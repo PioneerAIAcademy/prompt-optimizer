@@ -1,0 +1,11 @@
+question,context,answer,expected_score,category
+What is photosynthesis?,Plants convert sunlight to energy,Photosynthesis is the process by which plants convert light energy into chemical energy,4.5,biology
+What is 2+2?,Basic arithmetic,The answer is 4,5.0,math
+Explain gravity,Physics concept,"Gravity is a force that attracts objects toward each other. On Earth, it pulls objects toward the center of the planet.",4.0,physics
+What is the capital of France?,Geography question,Paris is the capital of France,5.0,geography
+Describe machine learning,AI concept,"Machine learning is a type of AI where computers learn from data without being explicitly programmed.",4.0,technology
+What causes rain?,Weather phenomenon,Rain is caused by water vapor condensing in clouds and falling as precipitation,4.5,weather
+Who wrote Romeo and Juliet?,Literature question,William Shakespeare wrote Romeo and Juliet,5.0,literature
+What is DNA?,Biology concept,DNA is the molecule that carries genetic information in living organisms,4.0,biology
+Explain the water cycle,Earth science,The water cycle involves evaporation from oceans and precipitation as rain,3.5,weather
+What is an atom?,Chemistry concept,An atom is the smallest unit of matter that retains the properties of an element,4.0,chemistry

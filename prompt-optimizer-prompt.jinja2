@@ -1,0 +1,57 @@
+You are an expert prompt engineer. Your task is to improve a system prompt based on evaluation examples.
+
+## Current System Prompt
+```
+{{ system_prompt }}
+```
+
+## User Prompt Template (for context)
+```
+{{ user_prompt_template }}
+```
+
+{% if analysis %}
+## Error Analysis
+The following analysis summarizes common issues found across the evaluation dataset:
+
+{{ analysis }}
+{% endif %}
+
+## Selected Examples
+Below are examples from the evaluation. Each shows the input, the LLM's response, and the scores received.
+
+{% for example in examples %}
+### Example {{ loop.index }}
+**Input Data:**
+{% for key, value in example.items() %}
+{% if key not in ['llm_response', 'extracted_score', 'extracted_reasoning'] and not key.endswith('_reason') %}
+- {{ key }}: {{ value }}
+{% endif %}
+{% endfor %}
+
+**LLM Response:**
+{{ example.llm_response | default("No response") }}
+
+**Scores:**
+{% for key, value in example.items() %}
+{% if not key.endswith('_reason') and key not in ['llm_response', 'extracted_score', 'extracted_reasoning'] %}
+{% if example[key ~ '_reason'] is defined %}
+- {{ key }}: {{ value }} ({{ example[key ~ '_reason'] }})
+{% endif %}
+{% endif %}
+{% endfor %}
+
+---
+{% endfor %}
+
+## Your Task
+Based on the examples above{% if analysis %} and the error analysis{% endif %}, create an improved version of the system prompt that will:
+1. Address the specific failure patterns observed
+2. Provide clearer instructions where the model struggled
+3. Maintain the original intent and format requirements
+
+Output your improved prompt between <optimized_prompt> and </optimized_prompt> tags.
+
+<optimized_prompt>
+[Your improved system prompt here]
+</optimized_prompt>

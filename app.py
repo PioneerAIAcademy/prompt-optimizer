@@ -1,0 +1,600 @@
+"""
+Prompt Optimizer Streamlit App
+
+A human-in-the-loop tool for iteratively optimizing LLM prompts.
+"""
+
+import os
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+
+import config
+from utils import (
+    EvaluationError,
+    calculate_score_averages,
+    ensure_dir,
+    extract_score_columns,
+    get_project_path,
+    get_run_path,
+    list_projects,
+    list_runs,
+    load_project_metadata,
+    load_prompt_file,
+    load_run_metadata,
+    save_project_metadata,
+    save_prompt_file,
+    save_run_metadata,
+    split_dataset,
+)
+
+PROJECTS_DIR = "./projects"
+
+st.set_page_config(page_title="Prompt Optimizer", layout="wide")
+st.title("Prompt Optimizer")
+
+
+def run_parallel_evaluation(
+    df: pd.DataFrame,
+    system_prompt: str,
+    user_prompt: str,
+    eval_model: str,
+    grader_prompt: str | None,
+    progress_bar,
+    status_text,
+) -> pd.DataFrame:
+    """
+    Run evaluation on a dataframe with parallel LLM calls.
+
+    Raises EvaluationError if any LLM call fails.
+    """
+    results = []
+    total = len(df)
+
+    def update_progress(completed: int, total: int) -> None:
+        progress_bar.progress(completed / total)
+        status_text.text(f"Processing {completed}/{total} rows...")
+
+    # Process rows sequentially but use parallel calls for the LLM
+    # This allows us to call config.eval and config.score for each row
+    for i, (_, row) in enumerate(df.iterrows()):
+        row_dict = row.to_dict()
+
+        # Call config.eval (this calls the LLM with retry)
+        eval_outputs = config.eval(row_dict, system_prompt, user_prompt, eval_model)
+
+        # Merge eval outputs into row
+        row_dict.update(eval_outputs)
+
+        # Call config.score
+        score_outputs = config.score(row_dict, grader_prompt, eval_model)
+        row_dict.update(score_outputs)
+
+        results.append(row_dict)
+        update_progress(i + 1, total)
+
+    return pd.DataFrame(results)
+
+
+def create_project_tab():
+    """Create New Project tab."""
+    st.header("Create New Project")
+
+    with st.form("create_project_form"):
+        # Project name
+        project_name = st.text_input("Project Name", placeholder="my-qa-project")
+
+        # Dataset upload
+        uploaded_file = st.file_uploader("Upload Dataset (CSV)", type="csv")
+
+        # Split ratio
+        split_ratio = st.selectbox(
+            "Split Ratio (Train/Dev/Test)",
+            ["40/40/20", "33/33/34", "50/25/25", "60/20/20"],
+            index=0,
+        )
+
+        # Model configuration
+        col1, col2 = st.columns(2)
+        with col1:
+            eval_model = st.text_input(
+                "Evaluation Model",
+                value="openai/responses/gpt-5-mini",
+                help="LiteLLM model string for evaluation",
+            )
+        with col2:
+            optimizer_model = st.text_input(
+                "Optimizer Model",
+                value="anthropic/claude-opus-4-5-20251101",
+                help="LiteLLM model string for optimization",
+            )
+
+        # Prompts
+        st.subheader("Baseline Prompts")
+        system_prompt = st.text_area(
+            "System Prompt",
+            height=200,
+            placeholder="You are a helpful assistant that...",
+        )
+        user_prompt = st.text_area(
+            "User Prompt Template",
+            height=100,
+            placeholder="Question: {question}\nContext: {context}",
+            help="Use {column_name} placeholders for dataset columns",
+        )
+
+        # Optional grader prompt
+        st.subheader("Optional: Grading Configuration")
+        grader_prompt = st.text_area(
+            "Grader Prompt (Jinja2 template, optional)",
+            height=150,
+            placeholder="Rate the following response...\n{{ row.llm_response }}",
+            help="Leave empty to use heuristic scoring only",
+        )
+
+        submitted = st.form_submit_button("Create Project")
+
+        if submitted:
+            if not project_name:
+                st.error("Please enter a project name")
+                return
+            if uploaded_file is None:
+                st.error("Please upload a dataset")
+                return
+            if not system_prompt or not user_prompt:
+                st.error("Please enter both system and user prompts")
+                return
+
+            # Create project
+            project_path = get_project_path(project_name, PROJECTS_DIR)
+            if os.path.exists(project_path):
+                st.error(f"Project '{project_name}' already exists")
+                return
+
+            ensure_dir(project_path)
+
+            # Load and split dataset
+            df = pd.read_csv(uploaded_file)
+            dataset_name = os.path.splitext(uploaded_file.name)[0]
+
+            # Get stratify column from config
+            stratify_col = config.stratify(df)
+
+            # Split dataset
+            train_df, dev_df, test_df = split_dataset(
+                df, split_ratio, stratify_column=stratify_col
+            )
+
+            # Save datasets
+            df.to_csv(os.path.join(project_path, f"{dataset_name}.csv"), index=False)
+            train_df.to_csv(
+                os.path.join(project_path, f"{dataset_name}-train.csv"), index=False
+            )
+            dev_df.to_csv(
+                os.path.join(project_path, f"{dataset_name}-dev.csv"), index=False
+            )
+            test_df.to_csv(
+                os.path.join(project_path, f"{dataset_name}-test.csv"), index=False
+            )
+
+            # Save grader prompt if provided
+            if grader_prompt.strip():
+                save_prompt_file(
+                    os.path.join(project_path, "grader_prompt.txt"), grader_prompt
+                )
+
+            # Save project metadata
+            metadata = {
+                "project_name": project_name,
+                "dataset_name": dataset_name,
+                "split_ratio": split_ratio,
+                "eval_model": eval_model,
+                "optimizer_model": optimizer_model,
+                "stratify_column": stratify_col,
+                "created_at": datetime.now().isoformat(),
+            }
+            save_project_metadata(project_path, metadata)
+
+            # Create baseline run
+            baseline_path = get_run_path(project_name, "baseline", PROJECTS_DIR)
+            ensure_dir(baseline_path)
+
+            save_prompt_file(os.path.join(baseline_path, "system_prompt.txt"), system_prompt)
+            save_prompt_file(os.path.join(baseline_path, "user_prompt.txt"), user_prompt)
+
+            run_metadata = {
+                "run_name": "baseline",
+                "created_at": datetime.now().isoformat(),
+                "parent_run": None,
+                "eval_completed": False,
+            }
+            save_run_metadata(baseline_path, run_metadata)
+
+            st.success(f"Project '{project_name}' created successfully!")
+            st.info(
+                f"Dataset split: {len(train_df)} train, {len(dev_df)} dev, {len(test_df)} test"
+            )
+
+
+def eval_tab():
+    """Evaluate tab."""
+    st.header("Evaluate")
+
+    # Project selection
+    projects = list_projects(PROJECTS_DIR)
+    if not projects:
+        st.warning("No projects found. Create a project first.")
+        return
+
+    project_name = st.selectbox("Select Project", projects)
+    project_path = get_project_path(project_name, PROJECTS_DIR)
+    project_meta = load_project_metadata(project_path)
+
+    # Run selection
+    runs = list_runs(project_path)
+    run_name = st.selectbox("Select Run", runs)
+    run_path = get_run_path(project_name, run_name, PROJECTS_DIR)
+
+    # Display current prompts
+    system_prompt = load_prompt_file(os.path.join(run_path, "system_prompt.txt"))
+    user_prompt = load_prompt_file(os.path.join(run_path, "user_prompt.txt"))
+
+    with st.expander("View Prompts"):
+        st.subheader("System Prompt")
+        st.code(system_prompt)
+        st.subheader("User Prompt Template")
+        st.code(user_prompt)
+
+    # Evaluate button
+    if st.button("Evaluate", type="primary"):
+        dataset_name = project_meta["dataset_name"]
+        eval_model = project_meta["eval_model"]
+
+        # Load grader prompt if exists
+        grader_path = os.path.join(project_path, "grader_prompt.txt")
+        grader_prompt = load_prompt_file(grader_path) if os.path.exists(grader_path) else None
+
+        try:
+            # Process each split
+            for split in ["train", "dev", "test"]:
+                st.subheader(f"Evaluating {split} split...")
+
+                # Load data
+                data_path = os.path.join(project_path, f"{dataset_name}-{split}.csv")
+                df = pd.read_csv(data_path)
+
+                # Progress bar
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                # Run evaluation with parallel LLM calls
+                results_df = run_parallel_evaluation(
+                    df,
+                    system_prompt,
+                    user_prompt,
+                    eval_model,
+                    grader_prompt,
+                    progress_bar,
+                    status_text,
+                )
+
+                # Save results
+                eval_path = os.path.join(run_path, f"eval-{split}.csv")
+                results_df.to_csv(eval_path, index=False)
+
+                st.success(f"Saved {split} evaluation to {eval_path}")
+
+            # Update run metadata with scores
+            run_meta = load_run_metadata(run_path)
+            run_meta["eval_completed"] = True
+            run_meta["scores"] = {}
+
+            for split in ["train", "dev", "test"]:
+                eval_path = os.path.join(run_path, f"eval-{split}.csv")
+                df = pd.read_csv(eval_path)
+                score_cols = extract_score_columns(df)
+                run_meta["scores"][split] = calculate_score_averages(df, score_cols)
+
+            save_run_metadata(run_path, run_meta)
+            st.success("Evaluation complete!")
+
+        except EvaluationError as e:
+            st.error(f"Evaluation failed: {e}")
+            st.error("Please check your API keys and model configuration.")
+
+
+def optimize_tab():
+    """Optimize tab with run comparison and example selection."""
+    st.header("Optimize")
+
+    # Project selection
+    projects = list_projects(PROJECTS_DIR)
+    if not projects:
+        st.warning("No projects found. Create a project first.")
+        return
+
+    project_name = st.selectbox("Select Project", projects, key="opt_project")
+    project_path = get_project_path(project_name, PROJECTS_DIR)
+    project_meta = load_project_metadata(project_path)
+
+    # Build runs table data
+    runs = list_runs(project_path)
+    runs_data = []
+    for run in runs:
+        run_path = get_run_path(project_name, run, PROJECTS_DIR)
+        try:
+            run_meta = load_run_metadata(run_path)
+            row = {"run_name": run, "eval_completed": run_meta.get("eval_completed", False)}
+
+            # Add score columns
+            if "scores" in run_meta:
+                for split in ["train", "dev", "test"]:
+                    if split in run_meta["scores"]:
+                        for score_name, value in run_meta["scores"][split].items():
+                            row[f"{split}_{score_name}"] = (
+                                round(value, 3) if value else None
+                            )
+
+            runs_data.append(row)
+        except Exception:
+            runs_data.append({"run_name": run, "eval_completed": False})
+
+    runs_df = pd.DataFrame(runs_data)
+
+    # Runs table with AgGrid
+    st.subheader("Runs")
+    gb = GridOptionsBuilder.from_dataframe(runs_df)
+    gb.configure_selection(selection_mode="single", use_checkbox=True)
+    gb.configure_column("run_name", pinned="left")
+    grid_options = gb.build()
+
+    runs_grid = AgGrid(
+        runs_df,
+        gridOptions=grid_options,
+        update_mode=GridUpdateMode.SELECTION_CHANGED,
+        fit_columns_on_grid_load=True,
+        height=200,
+    )
+
+    selected_rows = runs_grid.selected_rows
+
+    if selected_rows is not None and len(selected_rows) > 0:
+        # Handle both DataFrame and list return types
+        if isinstance(selected_rows, pd.DataFrame):
+            selected_run = selected_rows.iloc[0]["run_name"]
+        else:
+            selected_run = selected_rows[0]["run_name"]
+
+        run_path = get_run_path(project_name, selected_run, PROJECTS_DIR)
+
+        # Check if evaluation exists
+        eval_train_path = os.path.join(run_path, "eval-train.csv")
+        if not os.path.exists(eval_train_path):
+            st.warning(
+                f"Run '{selected_run}' has not been evaluated yet. Go to the Eval tab first."
+            )
+            return
+
+        # Load eval data
+        eval_df = pd.read_csv(eval_train_path)
+
+        # Compare run selection (optional)
+        st.subheader("Compare with another run (optional)")
+        other_runs = [r for r in runs if r != selected_run]
+        compare_run = st.selectbox("Compare with", ["None"] + other_runs)
+
+        if compare_run != "None":
+            compare_path = get_run_path(project_name, compare_run, PROJECTS_DIR)
+            compare_eval_path = os.path.join(compare_path, "eval-train.csv")
+            if os.path.exists(compare_eval_path):
+                compare_df = pd.read_csv(compare_eval_path)
+
+                # Add comparison columns
+                score_cols = extract_score_columns(eval_df)
+                for col in score_cols:
+                    if col in compare_df.columns:
+                        eval_df[f"{col}_compare"] = compare_df[col]
+                        eval_df[f"{col}_diff"] = eval_df[col] - compare_df[col]
+
+        # Train dataset table with AgGrid
+        st.subheader(f"Training Data - {selected_run}")
+
+        # Analysis section
+        st.subheader("Error Analysis (Optional)")
+
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            score_threshold = st.number_input(
+                "Score threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.1,
+                help="Analyze rows with scores below this threshold",
+            )
+            analyze_all = st.checkbox("Analyze all rows", value=False)
+
+        # Load or get analysis
+        analysis_key = f"analysis_{project_name}_{selected_run}"
+        analysis_text = st.session_state.get(analysis_key, "")
+
+        with col2:
+            if st.button("Analyze"):
+                # Filter rows for analysis
+                score_cols = extract_score_columns(eval_df)
+                if analyze_all or not score_cols:
+                    analysis_rows = eval_df.to_dict("records")
+                else:
+                    # Filter by first score column
+                    primary_score = score_cols[0]
+                    mask = eval_df[primary_score] < score_threshold
+                    analysis_rows = eval_df[mask].to_dict("records")
+
+                if not analysis_rows:
+                    st.warning("No rows match the filter criteria")
+                else:
+                    # Load analysis prompt
+                    project_analysis_path = os.path.join(
+                        project_path, "error-analysis-prompt.jinja2"
+                    )
+                    if os.path.exists(project_analysis_path):
+                        analysis_template = load_prompt_file(project_analysis_path)
+                    else:
+                        analysis_template = load_prompt_file("error-analysis-prompt.jinja2")
+
+                    with st.spinner(f"Analyzing {len(analysis_rows)} rows..."):
+                        try:
+                            analysis_text = config.analyze(
+                                analysis_rows,
+                                analysis_template,
+                                project_meta["optimizer_model"],
+                            )
+                            st.session_state[analysis_key] = analysis_text
+                        except Exception as e:
+                            st.error(f"Analysis failed: {e}")
+
+        # Editable analysis text
+        analysis_text = st.text_area(
+            "Analysis (editable)",
+            value=st.session_state.get(analysis_key, ""),
+            height=200,
+            key=f"analysis_edit_{project_name}_{selected_run}",
+        )
+
+        # Data grid for example selection
+        st.subheader("Select Examples for Optimization")
+
+        gb2 = GridOptionsBuilder.from_dataframe(eval_df)
+        gb2.configure_selection(selection_mode="multiple", use_checkbox=True)
+        gb2.configure_default_column(sortable=True, filterable=True, resizable=True)
+
+        # Enable column-specific configs
+        for col in eval_df.columns:
+            if len(eval_df) > 0:
+                sample_val = str(eval_df[col].iloc[0]) if len(eval_df) > 0 else ""
+                if len(sample_val) > 50:
+                    gb2.configure_column(col, wrapText=True, autoHeight=True, maxWidth=300)
+
+        grid_options2 = gb2.build()
+
+        data_grid = AgGrid(
+            eval_df,
+            gridOptions=grid_options2,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            fit_columns_on_grid_load=False,
+            height=400,
+            allow_unsafe_jscode=True,
+        )
+
+        selected_examples = data_grid.selected_rows
+
+        # Row detail view
+        if selected_examples is not None and len(selected_examples) == 1:
+            with st.expander("View Full Row Details"):
+                # Handle both DataFrame and list
+                if isinstance(selected_examples, pd.DataFrame):
+                    example_dict = selected_examples.iloc[0].to_dict()
+                else:
+                    example_dict = selected_examples[0]
+
+                for key, value in example_dict.items():
+                    st.markdown(f"**{key}:**")
+                    st.text(str(value))
+                    st.divider()
+
+        # Optimization
+        st.subheader("Generate Optimized Prompt")
+
+        target_run_name = st.text_input(
+            "New Run Name",
+            value=f"{selected_run}-v2",
+            help="Name for the new run with optimized prompt",
+        )
+
+        if st.button("Optimize", type="primary"):
+            if selected_examples is None or len(selected_examples) == 0:
+                st.error("Please select at least one example")
+                return
+
+            if not target_run_name:
+                st.error("Please enter a run name")
+                return
+
+            # Check if run already exists
+            target_path = get_run_path(project_name, target_run_name, PROJECTS_DIR)
+            if os.path.exists(target_path):
+                st.error(f"Run '{target_run_name}' already exists")
+                return
+
+            # Load current prompts
+            system_prompt = load_prompt_file(os.path.join(run_path, "system_prompt.txt"))
+            user_prompt = load_prompt_file(os.path.join(run_path, "user_prompt.txt"))
+
+            # Load optimizer prompt
+            optimizer_template = load_prompt_file("prompt-optimizer-prompt.jinja2")
+
+            # Convert selected examples to list of dicts
+            if isinstance(selected_examples, pd.DataFrame):
+                examples = selected_examples.to_dict("records")
+            else:
+                examples = list(selected_examples)
+
+            with st.spinner("Generating optimized prompt..."):
+                try:
+                    optimized_prompt = config.optimize(
+                        optimizer_template,
+                        system_prompt,
+                        user_prompt,
+                        examples,
+                        analysis_text if analysis_text.strip() else None,
+                        project_meta["optimizer_model"],
+                    )
+
+                    # Create new run
+                    ensure_dir(target_path)
+                    save_prompt_file(
+                        os.path.join(target_path, "system_prompt.txt"), optimized_prompt
+                    )
+                    save_prompt_file(
+                        os.path.join(target_path, "user_prompt.txt"), user_prompt
+                    )
+
+                    # Get indices of selected examples
+                    eval_records = eval_df.to_dict("records")
+                    selected_indices = []
+                    for i, record in enumerate(eval_records):
+                        if record in examples:
+                            selected_indices.append(i)
+
+                    run_meta = {
+                        "run_name": target_run_name,
+                        "created_at": datetime.now().isoformat(),
+                        "parent_run": selected_run,
+                        "eval_completed": False,
+                        "analysis_text": analysis_text,
+                        "selected_examples": selected_indices,
+                    }
+                    save_run_metadata(target_path, run_meta)
+
+                    st.success(f"Created new run '{target_run_name}' with optimized prompt!")
+
+                    with st.expander("View Optimized Prompt"):
+                        st.code(optimized_prompt)
+
+                except Exception as e:
+                    st.error(f"Optimization failed: {e}")
+
+
+# Main app
+tab1, tab2, tab3 = st.tabs(["Create Project", "Evaluate", "Optimize"])
+
+with tab1:
+    create_project_tab()
+
+with tab2:
+    eval_tab()
+
+with tab3:
+    optimize_tab()

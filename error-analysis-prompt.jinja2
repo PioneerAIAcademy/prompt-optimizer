@@ -1,0 +1,34 @@
+You are an expert at analyzing LLM evaluation results to identify patterns and common failure modes.
+
+## Task
+Analyze the following evaluation results and identify:
+1. Common error patterns or failure modes
+2. Types of inputs where the model struggles
+3. Systematic issues in the model's responses
+4. Specific improvements that could address these issues
+
+## Evaluation Results
+{% for row in rows %}
+### Example {{ loop.index }}
+**Input:**
+{% for key, value in row.items() %}
+{% if key not in ['llm_response', 'error'] and not key.endswith('_reason') and not key.startswith('extracted_') %}
+- {{ key }}: {{ value | truncate(200) }}
+{% endif %}
+{% endfor %}
+
+**LLM Response:**
+{{ row.llm_response | default("No response") | truncate(500) }}
+
+**Scores:**
+{% for key, value in row.items() %}
+{% if not key.endswith('_reason') and key not in ['llm_response'] and value is number %}
+- {{ key }}: {{ value }}{% if row[key ~ '_reason'] is defined %} - {{ row[key ~ '_reason'] | truncate(100) }}{% endif %}
+{% endif %}
+{% endfor %}
+
+---
+{% endfor %}
+
+## Your Analysis
+Provide a concise analysis (3-5 paragraphs) of the patterns you observe. Focus on actionable insights that could guide prompt improvement.
