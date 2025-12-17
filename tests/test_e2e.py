@@ -268,3 +268,98 @@ Reasoning: [text]"""
         print(f"Columns: {list(results_df.columns)}")
         if score_cols:
             print(f"Score averages: {averages}")
+
+
+class TestClusterFailuresE2E:
+    """E2E tests for clustering with real LLM calls."""
+
+    @pytest.fixture
+    def sample_failures(self):
+        """Sample failure rows for testing."""
+        return [
+            {
+                "_example_id": 1,
+                "question": "What is 2+2?",
+                "expected": "4",
+                "llm_response": "The answer is 5",
+                "accuracy": 0.0,
+                "accuracy_reason": "Wrong answer"
+            },
+            {
+                "_example_id": 2,
+                "question": "What is the capital of France?",
+                "expected": "Paris",
+                "llm_response": "I don't know",
+                "accuracy": 0.0,
+                "accuracy_reason": "No answer provided"
+            },
+            {
+                "_example_id": 3,
+                "question": "Explain quantum entanglement",
+                "expected": "Particles remain connected...",
+                "llm_response": "It's when particles are close together",
+                "accuracy": 0.3,
+                "accuracy_reason": "Partial understanding, missing key concepts"
+            },
+            {
+                "_example_id": 4,
+                "question": "What is 10*10?",
+                "expected": "100",
+                "llm_response": "The answer is 1000",
+                "accuracy": 0.0,
+                "accuracy_reason": "Wrong calculation"
+            },
+        ]
+
+    @pytest.fixture
+    def clustering_template(self):
+        """Load the clustering template."""
+        with open("clustering-prompt.jinja2", "r") as f:
+            return f.read()
+
+    def test_cluster_failures_returns_valid_structure(self, sample_failures, clustering_template):
+        """Test that cluster_failures returns properly structured output."""
+        import config
+
+        # Use the default model
+        model = os.environ.get("TEST_MODEL", "openai/gpt-4o-mini")
+
+        result = config.cluster_failures(
+            rows=sample_failures,
+            clustering_prompt_template=clustering_template,
+            score_column="accuracy",
+            model=model,
+            max_clusters=3
+        )
+
+        # Check structure
+        assert "clusters" in result
+        assert "raw_response" in result
+        assert "success" in result
+
+        # If successful, verify cluster structure
+        if result["success"]:
+            assert len(result["clusters"]) >= 1
+            assert len(result["clusters"]) <= 3
+
+            for cluster in result["clusters"]:
+                assert "label" in cluster
+                assert "description" in cluster
+                assert "example_ids" in cluster
+                assert isinstance(cluster["example_ids"], list)
+
+            # Verify all example IDs are from our input
+            all_ids = set()
+            for cluster in result["clusters"]:
+                all_ids.update(cluster["example_ids"])
+            valid_ids = {1, 2, 3, 4}
+            assert all_ids.issubset(valid_ids), f"Invalid IDs found: {all_ids - valid_ids}"
+
+            print("\n=== Clustering Results ===")
+            for i, cluster in enumerate(result["clusters"]):
+                print(f"Cluster {i+1}: {cluster['label']}")
+                print(f"  Description: {cluster['description']}")
+                print(f"  IDs: {cluster['example_ids']}")
+        else:
+            print("\nClustering failed to parse. Raw response:")
+            print(result["raw_response"][:500])

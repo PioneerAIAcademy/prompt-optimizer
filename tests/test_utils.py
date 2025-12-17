@@ -8,13 +8,21 @@ import pandas as pd
 import pytest
 
 from utils import (
+    add_example_ids,
+    bootstrap_ci,
     calculate_score_averages,
+    detect_regressions,
     ensure_dir,
     extract_score_columns,
+    format_score_with_ci,
     format_user_prompt,
+    get_trend_label,
     load_project_metadata,
     load_prompt_file,
+    paired_bootstrap_test,
+    parse_cluster_json,
     render_jinja_template,
+    sample_size_guidance,
     save_project_metadata,
     save_prompt_file,
     split_dataset,
@@ -174,3 +182,164 @@ class TestFileUtilities:
         ensure_dir(str(path))
         ensure_dir(str(path))  # Should not raise
         assert os.path.exists(path)
+
+
+class TestStatisticalUtilities:
+    """Tests for bootstrap CI and significance testing."""
+
+    def test_bootstrap_ci_returns_tuple(self):
+        scores = [0.7, 0.8, 0.75, 0.85, 0.9]
+        lower, upper = bootstrap_ci(scores)
+        assert isinstance(lower, float)
+        assert isinstance(upper, float)
+        assert lower <= upper
+
+    def test_bootstrap_ci_empty_list(self):
+        lower, upper = bootstrap_ci([])
+        assert lower == 0.0
+        assert upper == 0.0
+
+    def test_bootstrap_ci_single_value(self):
+        lower, upper = bootstrap_ci([0.5])
+        assert lower == 0.5
+        assert upper == 0.5
+
+    def test_bootstrap_ci_contains_mean(self):
+        scores = [0.7, 0.8, 0.75, 0.85, 0.9]
+        lower, upper = bootstrap_ci(scores)
+        mean = sum(scores) / len(scores)
+        assert lower <= mean <= upper
+
+    def test_paired_bootstrap_test_significant_difference(self):
+        # Clear improvement
+        scores_a = [0.5, 0.5, 0.5, 0.5, 0.5]
+        scores_b = [0.9, 0.9, 0.9, 0.9, 0.9]
+        result = paired_bootstrap_test(scores_a, scores_b)
+        assert result["significant"] is True
+        assert result["observed_diff"] > 0
+
+    def test_paired_bootstrap_test_no_difference(self):
+        # Same scores
+        scores = [0.7, 0.8, 0.75, 0.85, 0.9]
+        result = paired_bootstrap_test(scores, scores)
+        assert result["significant"] is False
+        assert abs(result["observed_diff"]) < 0.01
+
+    def test_paired_bootstrap_test_length_mismatch(self):
+        with pytest.raises(ValueError):
+            paired_bootstrap_test([0.5, 0.6], [0.5])
+
+    def test_sample_size_guidance_small(self):
+        assert "Too few" in sample_size_guidance(10)
+
+    def test_sample_size_guidance_medium(self):
+        assert "large effects" in sample_size_guidance(30)
+
+    def test_sample_size_guidance_good(self):
+        assert "medium effects" in sample_size_guidance(75)
+
+    def test_sample_size_guidance_excellent(self):
+        assert "small effects" in sample_size_guidance(150)
+
+    def test_format_score_with_ci(self):
+        scores = [0.7, 0.8, 0.75, 0.85, 0.9]
+        result = format_score_with_ci(scores)
+        assert "+/-" in result
+        assert "0.8" in result  # Mean is 0.8
+
+
+class TestExampleTracking:
+    """Tests for example ID generation and regression detection."""
+
+    def test_add_example_ids_generates_sequential(self):
+        df = pd.DataFrame({"question": ["Q1", "Q2", "Q3"]})
+        result = add_example_ids(df)
+        assert "_example_id" in result.columns
+        assert list(result["_example_id"]) == [0, 1, 2]
+
+    def test_add_example_ids_uses_existing_id(self):
+        df = pd.DataFrame({"id": ["a", "b", "c"], "question": ["Q1", "Q2", "Q3"]})
+        result = add_example_ids(df)
+        assert "_example_id" in result.columns
+        assert list(result["_example_id"]) == ["a", "b", "c"]
+
+    def test_add_example_ids_preserves_existing(self):
+        df = pd.DataFrame({"_example_id": [10, 20, 30], "question": ["Q1", "Q2", "Q3"]})
+        result = add_example_ids(df)
+        assert list(result["_example_id"]) == [10, 20, 30]
+
+    def test_get_trend_label_improving(self):
+        scores = [0.5, 0.6, 0.7]
+        runs = ["v1", "v2", "v3"]
+        assert "Improving" in get_trend_label(scores, runs)
+
+    def test_get_trend_label_regressed(self):
+        scores = [0.8, 0.6]
+        runs = ["v1", "v2"]
+        assert "Regressed" in get_trend_label(scores, runs)
+
+    def test_get_trend_label_oscillating(self):
+        scores = [0.5, 0.8, 0.5]
+        runs = ["v1", "v2", "v3"]
+        assert "Oscillating" in get_trend_label(scores, runs)
+
+    def test_get_trend_label_stable(self):
+        scores = [0.75, 0.76]
+        runs = ["v1", "v2"]
+        assert "Stable" in get_trend_label(scores, runs)
+
+    def test_detect_regressions_finds_broke(self):
+        history_df = pd.DataFrame({
+            "_example_id": [1, 2],
+            "baseline": [0.9, 0.4],
+            "v2": [0.3, 0.8]
+        })
+        result = detect_regressions(history_df, ["baseline", "v2"])
+        assert 1 in result["broke"]
+        assert 2 not in result["broke"]
+
+    def test_detect_regressions_finds_improved(self):
+        history_df = pd.DataFrame({
+            "_example_id": [1],
+            "baseline": [0.5],
+            "v2": [0.8]
+        })
+        result = detect_regressions(history_df, ["baseline", "v2"])
+        assert 1 in result["improved"]
+
+
+class TestParseClusterJson:
+    """Tests for JSON parsing from LLM responses."""
+
+    def test_parse_cluster_json_from_code_block(self):
+        response = '''Here is the analysis:
+```json
+{"clusters": [{"label": "Test", "description": "Test desc", "example_ids": [1, 2]}]}
+```
+'''
+        result = parse_cluster_json(response)
+        assert result is not None
+        assert "clusters" in result
+        assert len(result["clusters"]) == 1
+
+    def test_parse_cluster_json_raw(self):
+        response = '{"clusters": [{"label": "Test", "description": "Desc", "example_ids": [1]}]}'
+        result = parse_cluster_json(response)
+        assert result is not None
+        assert result["clusters"][0]["label"] == "Test"
+
+    def test_parse_cluster_json_invalid(self):
+        response = "This is not valid JSON at all"
+        result = parse_cluster_json(response)
+        assert result is None
+
+    def test_parse_cluster_json_partial(self):
+        response = '''Some text before
+{"clusters": [{"label": "A", "description": "B", "example_ids": [1, 2, 3]}]}
+Some text after'''
+        result = parse_cluster_json(response)
+        assert result is not None
+
+    def test_parse_cluster_json_empty_response(self):
+        result = parse_cluster_json("")
+        assert result is None

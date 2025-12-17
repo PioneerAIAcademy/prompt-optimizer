@@ -1,0 +1,44 @@
+You are an expert at analyzing LLM evaluation failures to identify patterns.
+
+## Task
+Analyze these failure examples and group them into 2-{{ max_clusters }} clusters based on the type of failure or error pattern.
+
+For each cluster, provide:
+1. A short label (3-5 words) describing the failure type
+2. A one-sentence description of the common pattern
+3. List of example IDs that belong to this cluster
+
+## Failure Examples
+
+{% for ex in failures %}
+### Example ID: {{ ex._example_id }}
+{% for key, value in ex.items() %}
+{% if key not in ['llm_response', '_example_id'] and not key.endswith('_reason') and not key.startswith('extracted_') %}
+**{{ key }}**: {{ value | string | truncate(200) }}
+{% endif %}
+{% endfor %}
+
+**LLM Response**: {{ ex.llm_response | default("No response") | truncate(400) }}
+
+**Score**: {{ ex[score_column] | default("N/A") }}
+{% if ex[score_column ~ '_reason'] is defined %}
+**Reason**: {{ ex[score_column ~ '_reason'] | truncate(150) }}
+{% endif %}
+
+---
+{% endfor %}
+
+## Output Format
+Respond with valid JSON only, no other text:
+
+```json
+{
+  "clusters": [
+    {
+      "label": "Short descriptive label",
+      "description": "One sentence describing the common failure pattern",
+      "example_ids": [1, 2, 3]
+    }
+  ]
+}
+```

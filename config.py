@@ -257,3 +257,56 @@ def analyze(
     response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
 
     return response
+
+
+def cluster_failures(
+    rows: list[dict],
+    clustering_prompt_template: str,
+    score_column: str,
+    model: str,
+    max_clusters: int = 5
+) -> dict:
+    """
+    Cluster failure examples by pattern using LLM.
+
+    Args:
+        rows: List of row dictionaries (failure examples)
+        clustering_prompt_template: Jinja2 template for clustering prompt
+        score_column: Name of the score column being analyzed
+        model: LiteLLM model string
+        max_clusters: Maximum number of clusters to request
+
+    Returns:
+        Dict with keys:
+        - clusters: List of cluster dicts with label, description, example_ids
+        - raw_response: The raw LLM response (for fallback display)
+        - success: Whether parsing succeeded
+    """
+    from utils import parse_cluster_json
+
+    # Render the prompt
+    formatted_prompt = render_jinja_template(
+        clustering_prompt_template,
+        failures=rows,
+        score_column=score_column,
+        max_clusters=max_clusters
+    )
+
+    # Call the LLM
+    response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+
+    # Try to parse the response
+    parsed = parse_cluster_json(response)
+
+    if parsed and "clusters" in parsed:
+        return {
+            "clusters": parsed["clusters"],
+            "raw_response": response,
+            "success": True
+        }
+    else:
+        return {
+            "clusters": [],
+            "raw_response": response,
+            "success": False
+        }

@@ -36,8 +36,9 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 ### Core Files
 
 - **app.py** - Streamlit UI with three tabs: Create Project, Evaluate, Optimize
-- **config.py** - User-customizable functions that control the evaluation pipeline. Contains 5 functions: `stratify()`, `eval()`, `score()`, `optimize()`, `analyze()`
-- **utils.py** - Reusable utilities for LLM calls, templates, dataset splitting, and file I/O
+- **config.py** - User-customizable functions that control the evaluation pipeline. Contains 6 functions: `stratify()`, `eval()`, `score()`, `optimize()`, `analyze()`, `cluster_failures()`
+- **utils.py** - Reusable utilities for LLM calls, templates, dataset splitting, file I/O, statistical functions, and example tracking
+- **clustering-prompt.jinja2** - Default template for LLM-based failure clustering
 
 ### Data Flow
 
@@ -49,12 +50,12 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 
 Projects are stored in `./projects/{project-name}/`:
 - `metadata.json` - Project settings (models, split ratio, etc.)
-- `{dataset}-train.csv`, `{dataset}-dev.csv`, `{dataset}-test.csv` - Data splits
+- `{dataset}-train.csv`, `{dataset}-dev.csv`, `{dataset}-test.csv` - Data splits (with `_example_id` column)
 - `grader_prompt.txt` - Optional LLM-as-judge prompt
 - `{run-name}/` - Run directories containing:
   - `system_prompt.txt`, `user_prompt.txt` - Prompts for this run
-  - `eval-train.csv`, `eval-dev.csv`, `eval-test.csv` - Evaluation results
-  - `metadata.json` - Run metadata and scores
+  - `eval-train.csv`, `eval-dev.csv`, `eval-test.csv` - Evaluation results (with `_example_id` column)
+  - `metadata.json` - Run metadata, scores, and optional `parent_run` for lineage tracking
 
 ### Customization Points
 
@@ -65,6 +66,7 @@ The main customization point is `config.py`. Modify these functions to adapt to 
 - `score(row, grader_prompt, model)` - Computes scores. Returns dict with paired keys (e.g., `accuracy` + `accuracy_reason`)
 - `optimize(...)` - Generates improved prompts. Extracts result from `<optimized_prompt>` tags
 - `analyze(rows, template, model)` - Identifies error patterns
+- `cluster_failures(rows, template, score_column, model, max_clusters)` - Groups low-scoring examples by failure pattern using LLM
 
 ### Template System
 
@@ -79,3 +81,31 @@ Scores must have paired keys for the UI to recognize them:
 - `{score_name}_reason` (explanation string)
 
 Example: `accuracy` + `accuracy_reason`
+
+### Statistical Features
+
+The app includes statistical utilities for data-driven optimization:
+
+- **Bootstrap CI** - `bootstrap_ci()` computes confidence intervals for score estimates
+- **Paired Bootstrap Test** - `paired_bootstrap_test()` tests significance of score differences between runs
+- **Sample Size Guidance** - `sample_size_guidance()` advises on statistical power based on test set size
+- **Format with CI** - `format_score_with_ci()` displays scores as "0.75 +/- 0.08"
+
+### Example Tracking
+
+Each dataset row gets a unique `_example_id` that persists across runs:
+
+- **add_example_ids()** - Assigns IDs during dataset splitting (uses `id` column if present, else sequential)
+- **get_run_lineage()** - Traces parent_run chain to find related runs
+- **load_example_history()** - Loads scores for examples across multiple runs
+- **detect_regressions()** - Finds examples that broke/improved between runs
+- **get_trend_label()** - Labels examples as "Improving", "Regressed", "Stable", or "Oscillating"
+
+### Failure Clustering
+
+The `cluster_failures()` function groups low-scoring examples by failure pattern:
+
+- Uses LLM with `clustering-prompt.jinja2` template
+- Returns 2-5 clusters with label, description, and example_ids
+- Parses JSON from LLM response with fallback handling via `parse_cluster_json()`
+- UI tracks coverage to ensure diverse example selection for optimization

@@ -15,15 +15,22 @@ import config
 from utils import (
     EvaluationError,
     calculate_score_averages,
+    detect_regressions,
     ensure_dir,
     extract_score_columns,
+    format_score_with_ci,
     get_project_path,
+    get_run_lineage,
     get_run_path,
+    get_trend_label,
     list_projects,
     list_runs,
+    load_example_history,
     load_project_metadata,
     load_prompt_file,
     load_run_metadata,
+    paired_bootstrap_test,
+    sample_size_guidance,
     save_project_metadata,
     save_prompt_file,
     save_run_metadata,
@@ -319,7 +326,7 @@ def optimize_tab():
     project_path = get_project_path(project_name, PROJECTS_DIR)
     project_meta = load_project_metadata(project_path)
 
-    # Build runs table data
+    # Build runs table data with confidence intervals
     runs = list_runs(project_path)
     runs_data = []
     for run in runs:
@@ -328,14 +335,19 @@ def optimize_tab():
             run_meta = load_run_metadata(run_path)
             row = {"run_name": run, "eval_completed": run_meta.get("eval_completed", False)}
 
-            # Add score columns
-            if "scores" in run_meta:
+            # Load eval data and compute scores with CIs
+            if run_meta.get("eval_completed", False):
                 for split in ["train", "dev", "test"]:
-                    if split in run_meta["scores"]:
-                        for score_name, value in run_meta["scores"][split].items():
-                            row[f"{split}_{score_name}"] = (
-                                round(value, 3) if value else None
-                            )
+                    eval_path = os.path.join(run_path, f"eval-{split}.csv")
+                    if os.path.exists(eval_path):
+                        eval_df = pd.read_csv(eval_path)
+                        score_cols = extract_score_columns(eval_df)
+                        for score_col in score_cols:
+                            scores = eval_df[score_col].dropna().tolist()
+                            if scores:
+                                row[f"{split}_{score_col}"] = format_score_with_ci(scores)
+                            else:
+                                row[f"{split}_{score_col}"] = "N/A"
 
             runs_data.append(row)
         except Exception:
@@ -369,6 +381,17 @@ def optimize_tab():
 
         run_path = get_run_path(project_name, selected_run, PROJECTS_DIR)
 
+        # Sample size warning
+        test_eval_path = os.path.join(run_path, "eval-test.csv")
+        if os.path.exists(test_eval_path):
+            test_df = pd.read_csv(test_eval_path)
+            n_test = len(test_df)
+            guidance = sample_size_guidance(n_test)
+            if n_test < 50:
+                st.warning(f"Test set has {n_test} examples. {guidance}")
+            else:
+                st.info(f"Test set has {n_test} examples. {guidance}")
+
         # Check if evaluation exists
         eval_train_path = os.path.join(run_path, "eval-train.csv")
         if not os.path.exists(eval_train_path):
@@ -379,6 +402,72 @@ def optimize_tab():
 
         # Load eval data
         eval_df = pd.read_csv(eval_train_path)
+
+        # Example Performance Diff View
+        lineage = get_run_lineage(project_path, selected_run)
+
+        if len(lineage) >= 2:
+            st.subheader("Example Performance Across Runs")
+
+            # Get primary score column
+            score_cols = extract_score_columns(eval_df)
+
+            if score_cols and "_example_id" in eval_df.columns:
+                primary_score = score_cols[0]
+
+                # Load history
+                history_df = load_example_history(
+                    project_path, lineage, "train", primary_score
+                )
+
+                if len(history_df) > 0:
+                    # Detect regressions
+                    regressions = detect_regressions(history_df, lineage)
+
+                    # Show warnings
+                    if regressions["broke"]:
+                        st.warning(
+                            f"{len(regressions['broke'])} examples that passed in "
+                            f"{lineage[0]} now fail. Consider including them in optimization."
+                        )
+
+                    if regressions["oscillating"]:
+                        st.info(
+                            f"{len(regressions['oscillating'])} examples are oscillating "
+                            f"(improved then regressed or vice versa)."
+                        )
+
+                    # Build display DataFrame
+                    display_df = history_df.copy()
+
+                    # Add trend column
+                    def compute_trend(row):
+                        scores = [row.get(run) for run in lineage if run in row and pd.notna(row.get(run))]
+                        return get_trend_label(scores, lineage)
+
+                    display_df["Trend"] = display_df.apply(compute_trend, axis=1)
+
+                    # Reorder columns
+                    cols = ["_example_id"] + lineage + ["Trend"]
+                    display_df = display_df[[c for c in cols if c in display_df.columns]]
+
+                    # Round scores for display
+                    for run in lineage:
+                        if run in display_df.columns:
+                            display_df[run] = display_df[run].round(2)
+
+                    # Show table
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        height=300
+                    )
+            else:
+                if "_example_id" not in eval_df.columns:
+                    st.info(
+                        "Example tracking not available. "
+                        "Re-run evaluation to enable per-example tracking."
+                    )
 
         # Compare run selection (optional)
         st.subheader("Compare with another run (optional)")
@@ -397,6 +486,27 @@ def optimize_tab():
                     if col in compare_df.columns:
                         eval_df[f"{col}_compare"] = compare_df[col]
                         eval_df[f"{col}_diff"] = eval_df[col] - compare_df[col]
+
+                # Show significance test results
+                st.subheader("Statistical Comparison")
+                for col in score_cols:
+                    if col in compare_df.columns:
+                        scores_selected = eval_df[col].dropna().tolist()
+                        scores_compare = compare_df[col].dropna().tolist()
+
+                        # Align by index for paired test
+                        min_len = min(len(scores_selected), len(scores_compare))
+                        if min_len > 0:
+                            result = paired_bootstrap_test(
+                                scores_compare[:min_len],
+                                scores_selected[:min_len]
+                            )
+                            sig_marker = "✓ significant" if result["significant"] else "ns"
+                            st.write(
+                                f"**{col}**: {result['observed_diff']:+.3f} "
+                                f"(95% CI: [{result['ci_lower']:.3f}, {result['ci_upper']:.3f}]) "
+                                f"**{sig_marker}**"
+                            )
 
         # Train dataset table with AgGrid
         st.subheader(f"Training Data - {selected_run}")
@@ -462,6 +572,112 @@ def optimize_tab():
             height=200,
             key=f"analysis_edit_{project_name}_{selected_run}",
         )
+
+        # Failure Clustering Section
+        st.subheader("Failure Clustering")
+
+        cluster_col1, cluster_col2 = st.columns([1, 3])
+        with cluster_col1:
+            cluster_threshold = st.number_input(
+                "Cluster threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.1,
+                help="Cluster rows with scores below this threshold"
+            )
+
+        # Session state for clustering results
+        cluster_key = f"clusters_{project_name}_{selected_run}"
+
+        with cluster_col2:
+            if st.button("Cluster Failures"):
+                # Filter rows for clustering
+                score_cols = extract_score_columns(eval_df)
+                if not score_cols:
+                    st.error("No score columns found. Run evaluation first.")
+                else:
+                    primary_score = score_cols[0]
+                    mask = eval_df[primary_score] < cluster_threshold
+                    failure_rows = eval_df[mask].to_dict("records")
+
+                    if not failure_rows:
+                        st.warning("No rows below threshold to cluster")
+                    elif "_example_id" not in eval_df.columns:
+                        st.error("Example IDs not found. Re-run evaluation to enable clustering.")
+                    else:
+                        # Load clustering template
+                        project_clustering_path = os.path.join(
+                            project_path, "clustering-prompt.jinja2"
+                        )
+                        if os.path.exists(project_clustering_path):
+                            clustering_template = load_prompt_file(project_clustering_path)
+                        else:
+                            clustering_template = load_prompt_file("clustering-prompt.jinja2")
+
+                        with st.spinner(f"Clustering {len(failure_rows)} failures..."):
+                            try:
+                                result = config.cluster_failures(
+                                    failure_rows,
+                                    clustering_template,
+                                    primary_score,
+                                    project_meta["optimizer_model"]
+                                )
+                                st.session_state[cluster_key] = result
+                            except Exception as e:
+                                st.error(f"Clustering failed: {e}")
+
+        # Display clustering results
+        if cluster_key in st.session_state:
+            cluster_result = st.session_state[cluster_key]
+
+            if cluster_result["success"]:
+                st.markdown(f"**Found {len(cluster_result['clusters'])} clusters:**")
+
+                for i, cluster in enumerate(cluster_result["clusters"]):
+                    with st.container():
+                        st.markdown(f"**Cluster {i+1}: {cluster.get('label', 'Unnamed')}** "
+                                   f"({len(cluster.get('example_ids', []))} examples)")
+                        st.markdown(f"_{cluster.get('description', 'No description')}_")
+                        st.markdown(f"IDs: {', '.join(map(str, cluster.get('example_ids', [])))}")
+                        st.divider()
+
+                # Coverage tracking
+                selected_ids = set(st.session_state.get("selected_example_ids", []))
+
+                if selected_ids:
+                    st.markdown("**Selection Coverage:**")
+                    covered = 0
+                    for cluster in cluster_result["clusters"]:
+                        cluster_ids = set(cluster.get("example_ids", []))
+                        has_selection = bool(cluster_ids & selected_ids)
+                        if has_selection:
+                            covered += 1
+                            st.markdown(f"- Cluster '{cluster.get('label', '?')}': ✓ Selected")
+                        else:
+                            st.markdown(f"- Cluster '{cluster.get('label', '?')}': ✗ Not covered")
+
+                    total = len(cluster_result["clusters"])
+                    if covered < total:
+                        st.warning(f"Coverage: {covered}/{total} clusters. "
+                                  f"Consider selecting from uncovered clusters.")
+
+                # Auto-select button
+                if st.button("Auto-select diverse set"):
+                    diverse_ids = []
+                    for cluster in cluster_result["clusters"]:
+                        ids = cluster.get("example_ids", [])
+                        if ids:
+                            diverse_ids.append(ids[0])  # Take first from each cluster
+                    st.info(f"Suggested IDs for diverse selection: {diverse_ids}")
+                    st.caption("Select these IDs manually in the grid below.")
+
+            else:
+                # Fallback: show raw response
+                st.warning("Clustering couldn't parse structured output. "
+                          "You can still select examples manually below.")
+                with st.expander("Show raw analysis"):
+                    st.code(cluster_result["raw_response"])
 
         # Data grid for example selection
         st.subheader("Select Examples for Optimization")
