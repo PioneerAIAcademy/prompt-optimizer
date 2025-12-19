@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
@@ -329,14 +330,20 @@ def optimize_tab():
     # Build runs table data with confidence intervals
     runs = list_runs(project_path)
     runs_data = []
+    runs_raw_scores = []  # Raw numeric scores for parallel coordinates
     for run in runs:
         run_path = get_run_path(project_name, run, PROJECTS_DIR)
         try:
             run_meta = load_run_metadata(run_path)
             row = {"run_name": run, "eval_completed": run_meta.get("eval_completed", False)}
+            raw_row = {"run_name": run, "eval_completed": run_meta.get("eval_completed", False)}
 
             # Load eval data and compute scores with CIs
             if run_meta.get("eval_completed", False):
+                # Compute lineage depth for coloring
+                lineage = get_run_lineage(project_path, run)
+                raw_row["_lineage_depth"] = len(lineage) - 1
+
                 for split in ["train", "dev", "test"]:
                     eval_path = os.path.join(run_path, f"eval-{split}.csv")
                     if os.path.exists(eval_path):
@@ -346,14 +353,125 @@ def optimize_tab():
                             scores = eval_df[score_col].dropna().tolist()
                             if scores:
                                 row[f"{split}_{score_col}"] = format_score_with_ci(scores)
+                                raw_row[f"{split}_{score_col}"] = sum(scores) / len(scores)
                             else:
                                 row[f"{split}_{score_col}"] = "N/A"
+                                raw_row[f"{split}_{score_col}"] = None
 
             runs_data.append(row)
+            runs_raw_scores.append(raw_row)
         except Exception:
             runs_data.append({"run_name": run, "eval_completed": False})
+            runs_raw_scores.append({"run_name": run, "eval_completed": False})
 
     runs_df = pd.DataFrame(runs_data)
+
+    # Parallel coordinates visualization for comparing runs
+    completed_raw = [r for r in runs_raw_scores if r.get("eval_completed", False)]
+
+    if len(completed_raw) >= 3:
+        st.subheader("Run Comparison")
+
+        # Split selector
+        viz_split = st.radio(
+            "Score split",
+            ["dev", "test", "train"],
+            horizontal=True,
+            help="Choose which data split to visualize scores for",
+        )
+
+        # Get score columns for this split
+        sample_row = completed_raw[0]
+        score_cols = [
+            k.replace(f"{viz_split}_", "")
+            for k in sample_row.keys()
+            if k.startswith(f"{viz_split}_") and sample_row[k] is not None
+        ]
+
+        if score_cols:
+            # Build plot dataframe
+            plot_data = []
+            for r in completed_raw:
+                plot_row = {
+                    "run_name": r["run_name"],
+                    "_lineage_depth": r.get("_lineage_depth", 0),
+                }
+                for col in score_cols:
+                    key = f"{viz_split}_{col}"
+                    plot_row[col] = r.get(key)
+                plot_data.append(plot_row)
+
+            plot_df = pd.DataFrame(plot_data)
+
+            # Filter out rows with missing scores
+            plot_df = plot_df.dropna(subset=score_cols)
+
+            if len(plot_df) >= 2:
+                # Create dimensions for parallel coordinates
+                dimensions = []
+                for col in score_cols:
+                    values = plot_df[col].tolist()
+                    col_min = min(values) if values else 0
+                    col_max = max(values) if values else 1
+                    # Add padding to range
+                    padding = (col_max - col_min) * 0.1 if col_max > col_min else 0.1
+                    dimensions.append(
+                        dict(
+                            range=[max(0, col_min - padding), min(1, col_max + padding)],
+                            label=col.replace("_", " ").title(),
+                            values=values,
+                        )
+                    )
+
+                # Color by lineage depth (baseline=0, later iterations higher)
+                max_depth = plot_df["_lineage_depth"].max()
+                color_values = plot_df["_lineage_depth"].tolist()
+
+                fig = go.Figure(
+                    data=go.Parcoords(
+                        line=dict(
+                            color=color_values,
+                            colorscale="Viridis",
+                            showscale=False,
+                            cmin=0,
+                            cmax=max(max_depth, 1),
+                        ),
+                        dimensions=dimensions,
+                        labelangle=-30,
+                        labelside="top",
+                    )
+                )
+
+                fig.update_layout(
+                    margin=dict(l=80, r=80, t=60, b=30),
+                    height=300,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Color legend showing run names
+                st.caption("**Run Legend** (color indicates optimization iteration):")
+                legend_cols = st.columns(min(len(plot_df), 6))
+                viridis_colors = [
+                    "#440154", "#482878", "#3e4a89", "#31688e", "#26828e",
+                    "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725",
+                ]
+                for i, (_, row) in enumerate(plot_df.iterrows()):
+                    depth = int(row["_lineage_depth"])
+                    # Map depth to color index
+                    color_idx = min(depth, len(viridis_colors) - 1)
+                    color = viridis_colors[color_idx]
+                    with legend_cols[i % len(legend_cols)]:
+                        st.markdown(
+                            f'<span style="color:{color}; font-weight:bold;">●</span> {row["run_name"]}',
+                            unsafe_allow_html=True,
+                        )
+            else:
+                st.info("Need at least 2 runs with complete scores for comparison chart.")
+        else:
+            st.info(f"No score data available for {viz_split} split.")
 
     # Runs table with AgGrid
     st.subheader("Runs")
