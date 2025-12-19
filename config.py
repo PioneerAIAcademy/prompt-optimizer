@@ -8,11 +8,19 @@ The default implementations work for a Q&A grading task.
 import re
 
 from utils import (
-    call_llm,
+    ClusterResponse,
+    EvalResponse,
+    EvaluationError,
+    GraderResponse,
     call_llm_single_prompt,
+    call_llm_structured,
     format_user_prompt,
     render_jinja_template,
 )
+
+# Score scale configuration (default 1-5 scale, range = 4)
+# Adjust these if your scoring system uses a different scale
+SCORE_SCALE_RANGE = 4.0  # max_score - min_score (e.g., 5 - 1 = 4)
 
 
 def stratify(df) -> str | None:
@@ -35,7 +43,7 @@ def stratify(df) -> str | None:
         ...     return None
     """
     # Default: look for common stratification columns
-    for col in ["category", "label", "difficulty", "score", "rating"]:
+    for col in ["category", "label", "difficulty", "score", "rating", "expected_score"]:
         if col in df.columns:
             return col
     return None
@@ -48,12 +56,11 @@ def eval(
     model: str,
 ) -> dict:
     """
-    Evaluate a single row by calling the LLM.
+    Evaluate a single row by calling the LLM with structured output.
 
     This function:
     1. Formats the user prompt with values from the row
-    2. Calls the LLM with the system and user prompts
-    3. Extracts structured outputs from the response
+    2. Calls the LLM with structured output to get response, score, and reasoning
 
     Args:
         row: Dictionary of column values from the dataset
@@ -62,41 +69,45 @@ def eval(
         model: LiteLLM model string
 
     Returns:
-        Dictionary of extracted outputs to add to the row.
-        Must include 'llm_response' key with the raw response.
+        Dictionary of outputs to add to the row:
+        - response: The main LLM response text
+        - score: Numeric score if the prompt asks for one (optional)
+        - reasoning: Explanation for the score (optional)
 
     Example return:
         {
-            "llm_response": "The answer is correct because...",
-            "extracted_score": 4.5,
-            "extracted_reasoning": "The response accurately..."
+            "response": "The answer is correct because...",
+            "score": 4.5,
+            "reasoning": "The response accurately..."
         }
     """
     # Format the user prompt with row values
-    user_prompt = format_user_prompt(user_prompt_template, row)
+    try:
+        user_prompt = format_user_prompt(user_prompt_template, row)
+    except KeyError as e:
+        raise EvaluationError(f"User prompt template references missing column: {e}")
 
-    # Call the LLM
-    response = call_llm(system_prompt, user_prompt, model)
+    # Call the LLM with structured output
+    try:
+        result = call_llm_structured(
+            prompt=user_prompt,
+            model=model,
+            response_model=EvalResponse,
+            system_prompt=system_prompt,
+        )
+    except Exception as e:
+        raise EvaluationError(f"LLM call failed in eval: {e}")
 
-    # Extract structured outputs from response
-    # Default implementation: extract score and reasoning
+    # Build output dict from structured response
     outputs = {
-        "llm_response": response,
+        "response": result.response,
     }
 
-    # Try to extract a numeric score (pattern: "Score: X" or "**Score:** X")
-    score_match = re.search(r"\*?\*?Score:?\*?\*?\s*(\d+\.?\d*)", response, re.IGNORECASE)
-    if score_match:
-        outputs["extracted_score"] = float(score_match.group(1))
+    if result.score is not None:
+        outputs["score"] = result.score
 
-    # Try to extract reasoning/justification
-    reasoning_match = re.search(
-        r"(?:Reasoning|Justification|Explanation):\s*(.+?)(?=\n\n|\n[A-Z]|\Z)",
-        response,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if reasoning_match:
-        outputs["extracted_reasoning"] = reasoning_match.group(1).strip()
+    if result.reasoning is not None:
+        outputs["reasoning"] = result.reasoning
 
     return outputs
 
@@ -110,13 +121,13 @@ def score(
     Score an evaluated row, returning scores with reasons.
 
     This function can use:
-    - LLM-as-a-judge (using grader_prompt)
+    - LLM-as-a-judge (using grader_prompt) with structured output
     - Simple heuristics (comparing to expected output)
     - External APIs
 
     Args:
         row: Dictionary containing original data plus eval outputs
-             (e.g., 'llm_response', 'extracted_score')
+             (e.g., 'response', 'score')
         grader_prompt: Optional Jinja2 template for LLM-as-judge grading
         model: LiteLLM model string for grading
 
@@ -135,39 +146,49 @@ def score(
     scores = {}
 
     # If we have an extracted score and expected score, compute accuracy
-    if "extracted_score" in row and "expected_score" in row:
-        extracted = row["extracted_score"]
+    if "score" in row and "expected_score" in row:
+        extracted = row["score"]
         expected = row["expected_score"]
 
-        # Calculate accuracy as 1 - normalized_difference
-        # Assuming scores are on a 1-5 scale
-        diff = abs(extracted - expected)
-        accuracy = max(0.0, 1.0 - (diff / 4.0))
+        # Validate types before arithmetic
+        try:
+            extracted = float(extracted)
+            expected = float(expected)
+        except (TypeError, ValueError) as e:
+            scores["accuracy"] = 0.0
+            scores["accuracy_reason"] = f"Type error in scores: {e}"
+        else:
+            # Calculate accuracy as 1 - normalized_difference
+            # Using configurable SCORE_SCALE_RANGE (default 4.0 for 1-5 scale)
+            diff = abs(extracted - expected)
+            accuracy = max(0.0, 1.0 - (diff / SCORE_SCALE_RANGE))
 
-        scores["accuracy"] = round(accuracy, 3)
-        scores["accuracy_reason"] = (
-            f"Extracted score: {extracted}, Expected: {expected}, Difference: {diff:.2f}"
-        )
+            scores["accuracy"] = round(accuracy, 3)
+            scores["accuracy_reason"] = (
+                f"Extracted score: {extracted}, Expected: {expected}, Difference: {diff:.2f}"
+            )
 
-    # If we have a grader prompt, use LLM-as-judge for additional scoring
-    if grader_prompt and "llm_response" in row:
-        # Render the grader prompt with row data
-        formatted_grader = render_jinja_template(grader_prompt, row=row)
+    # If we have a grader prompt, use LLM-as-judge with structured output
+    if grader_prompt and "response" in row:
+        try:
+            # Render the grader prompt with row data
+            formatted_grader = render_jinja_template(grader_prompt, row=row)
 
-        # Call the grading LLM
-        grading_response = call_llm_single_prompt(formatted_grader, model, temperature=0.0)
+            # Call the grading LLM with structured output
+            result = call_llm_structured(
+                prompt=formatted_grader,
+                model=model,
+                response_model=GraderResponse,
+                temperature=0.0,
+            )
 
-        # Extract relevance score from grading response
-        relevance_match = re.search(
-            r"(?:Relevance|Quality).*?(\d+\.?\d*)\s*/\s*(\d+)",
-            grading_response,
-            re.IGNORECASE,
-        )
-        if relevance_match:
-            score_val = float(relevance_match.group(1))
-            max_val = float(relevance_match.group(2))
-            scores["relevance"] = round(score_val / max_val, 3)
-            scores["relevance_reason"] = grading_response[:500]  # Truncate for storage
+            # Clamp relevance to valid range
+            relevance = max(0.0, min(1.0, result.relevance))
+            scores["relevance"] = round(relevance, 3)
+            scores["relevance_reason"] = result.relevance_reason
+
+        except Exception as e:
+            raise EvaluationError(f"Grading LLM call failed: {e}")
 
     # Default score if nothing else computed
     if not scores:
@@ -184,53 +205,68 @@ def optimize(
     examples: list[dict],
     analysis: str | None,
     model: str,
+    target_prompt: str = "system",
 ) -> str:
     """
-    Generate an optimized system prompt based on examples and analysis.
+    Generate an optimized prompt based on examples and analysis.
 
     Args:
         optimizer_prompt_template: Jinja2 template for the optimizer
-        system_prompt: Current system prompt to optimize
-        user_prompt_template: Current user prompt template (for context)
+        system_prompt: Current system prompt
+        user_prompt_template: Current user prompt template
         examples: List of row dictionaries (selected examples with scores)
         analysis: Optional error analysis text
         model: LiteLLM model string for optimization
+        target_prompt: Which prompt to optimize ("system" or "user")
 
     Returns:
-        Optimized system prompt string
+        Optimized prompt string (system or user prompt depending on target_prompt)
     """
     # Render the optimizer prompt
-    formatted_prompt = render_jinja_template(
-        optimizer_prompt_template,
-        system_prompt=system_prompt,
-        user_prompt_template=user_prompt_template,
-        examples=examples,
-        analysis=analysis,
-    )
+    try:
+        formatted_prompt = render_jinja_template(
+            optimizer_prompt_template,
+            system_prompt=system_prompt,
+            user_prompt_template=user_prompt_template,
+            examples=examples,
+            analysis=analysis,
+            target_prompt=target_prompt,
+        )
+    except Exception as e:
+        raise EvaluationError(f"Failed to render optimizer template: {e}")
 
     # Call the optimizer LLM
-    response = call_llm_single_prompt(formatted_prompt, model, temperature=0.7)
+    try:
+        response = call_llm_single_prompt(formatted_prompt, model, temperature=0.7)
+    except Exception as e:
+        raise EvaluationError(f"Optimizer LLM call failed: {e}")
 
     # Extract the optimized prompt from the response
-    # Look for content between <optimized_prompt> tags or return full response
+    # Look for content between <optimized_prompt> tags (case-insensitive, flexible whitespace)
     prompt_match = re.search(
-        r"<optimized_prompt>(.*?)</optimized_prompt>",
+        r"<\s*optimized_prompt\s*>(.*?)<\s*/\s*optimized_prompt\s*>",
         response,
-        re.DOTALL,
+        re.DOTALL | re.IGNORECASE,
     )
     if prompt_match:
         return prompt_match.group(1).strip()
 
-    # Alternative: look for content after "Optimized Prompt:" header
+    # Alternative: look for content after common header formats
     header_match = re.search(
-        r"(?:Optimized Prompt|New Prompt|Improved Prompt):\s*\n(.*)",
+        r"(?:Optimized\s+Prompt|New\s+Prompt|Improved\s+Prompt|Updated\s+Prompt)\s*:\s*\n(.*)",
         response,
         re.DOTALL | re.IGNORECASE,
     )
     if header_match:
         return header_match.group(1).strip()
 
-    # Return full response if no markers found
+    # If no markers found, log a warning and return the response
+    # This allows the user to see what the LLM generated even if format was unexpected
+    import logging
+    logging.warning(
+        "Optimizer response did not contain expected markers. "
+        "Returning full response. Consider checking the optimizer prompt template."
+    )
     return response.strip()
 
 
@@ -249,12 +285,24 @@ def analyze(
 
     Returns:
         Analysis text describing common error patterns
+
+    Raises:
+        EvaluationError: If template rendering or LLM call fails
     """
+    if not rows:
+        return "No rows provided for analysis."
+
     # Render the analysis prompt with the rows
-    formatted_prompt = render_jinja_template(analysis_prompt_template, rows=rows)
+    try:
+        formatted_prompt = render_jinja_template(analysis_prompt_template, rows=rows)
+    except Exception as e:
+        raise EvaluationError(f"Failed to render analysis template: {e}")
 
     # Call the LLM
-    response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+    try:
+        response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+    except Exception as e:
+        raise EvaluationError(f"Analysis LLM call failed: {e}")
 
     return response
 
@@ -267,7 +315,7 @@ def cluster_failures(
     max_clusters: int = 5
 ) -> dict:
     """
-    Cluster failure examples by pattern using LLM.
+    Cluster failure examples by pattern using LLM with structured output.
 
     Args:
         rows: List of row dictionaries (failure examples)
@@ -277,36 +325,38 @@ def cluster_failures(
         max_clusters: Maximum number of clusters to request
 
     Returns:
-        Dict with keys:
+        Dict with key:
         - clusters: List of cluster dicts with label, description, example_ids
-        - raw_response: The raw LLM response (for fallback display)
-        - success: Whether parsing succeeded
+
+    Raises:
+        EvaluationError: If template rendering or LLM call fails
     """
-    from utils import parse_cluster_json
+    if not rows:
+        return {"clusters": []}
 
     # Render the prompt
-    formatted_prompt = render_jinja_template(
-        clustering_prompt_template,
-        failures=rows,
-        score_column=score_column,
-        max_clusters=max_clusters
-    )
+    try:
+        formatted_prompt = render_jinja_template(
+            clustering_prompt_template,
+            failures=rows,
+            score_column=score_column,
+            max_clusters=max_clusters
+        )
+    except Exception as e:
+        raise EvaluationError(f"Failed to render clustering template: {e}")
 
-    # Call the LLM
-    response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+    # Call the LLM with structured output
+    try:
+        result = call_llm_structured(
+            prompt=formatted_prompt,
+            model=model,
+            response_model=ClusterResponse,
+            temperature=0.3,
+        )
+    except Exception as e:
+        raise EvaluationError(f"Clustering LLM call failed: {e}")
 
-    # Try to parse the response
-    parsed = parse_cluster_json(response)
-
-    if parsed and "clusters" in parsed:
-        return {
-            "clusters": parsed["clusters"],
-            "raw_response": response,
-            "success": True
-        }
-    else:
-        return {
-            "clusters": [],
-            "raw_response": response,
-            "success": False
-        }
+    # Convert Pydantic models to dicts for compatibility
+    return {
+        "clusters": [cluster.model_dump() for cluster in result.clusters],
+    }

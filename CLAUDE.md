@@ -40,6 +40,15 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 - **utils.py** - Reusable utilities for LLM calls, templates, dataset splitting, file I/O, statistical functions, and example tracking
 - **clustering-prompt.jinja2** - Default template for LLM-based failure clustering
 
+### Sample Data
+
+The `samples/` directory contains a working example (BYU-Pathway chatbot answer evaluation):
+- `answer-evaluation.csv` - 153 examples with columns: `question`, `human_answer`, `ai_answer`, `retrieved_content`, `expected_score`
+- `system_prompt.txt` - Grading rubric (1-5 scale) for evaluating AI answers
+- `user_prompt.txt` - User prompt template with `{column}` placeholders
+
+This sample data is the same example used in the companion `opik-demo` repository, allowing students to compare different optimization approaches.
+
 ### Data Flow
 
 1. **Create Project**: Upload CSV dataset → split into train/dev/test → save baseline prompts
@@ -49,7 +58,7 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 ### Project File Structure
 
 Projects are stored in `./projects/{project-name}/`:
-- `metadata.json` - Project settings (models, split ratio, etc.)
+- `metadata.json` - Project settings (models, split ratio, `prompt_to_optimize`, etc.)
 - `{dataset}-train.csv`, `{dataset}-dev.csv`, `{dataset}-test.csv` - Data splits (with `_example_id` column)
 - `grader_prompt.txt` - Optional LLM-as-judge prompt
 - `{run-name}/` - Run directories containing:
@@ -62,17 +71,29 @@ Projects are stored in `./projects/{project-name}/`:
 The main customization point is `config.py`. Modify these functions to adapt to different use cases:
 
 - `stratify(df)` - Returns column name for dataset stratification
-- `eval(row, system_prompt, user_prompt_template, model)` - Calls LLM and extracts outputs. Must return dict with `llm_response` key
+- `eval(row, system_prompt, user_prompt_template, model)` - Calls LLM and extracts outputs. Must return dict with `response` key
 - `score(row, grader_prompt, model)` - Computes scores. Returns dict with paired keys (e.g., `accuracy` + `accuracy_reason`)
-- `optimize(...)` - Generates improved prompts. Extracts result from `<optimized_prompt>` tags
+- `optimize(..., target_prompt)` - Generates improved prompt (system or user based on `target_prompt`). Extracts result from `<optimized_prompt>` tags
 - `analyze(rows, template, model)` - Identifies error patterns
 - `cluster_failures(rows, template, score_column, model, max_clusters)` - Groups low-scoring examples by failure pattern using LLM
 
 ### Template System
 
-- User prompts use Python format strings: `{column_name}` placeholders
+- User prompts use Python format strings: `{column_name}` placeholders (system prompts do not support placeholders)
 - Optimizer and analyzer prompts use Jinja2 templates (`.jinja2` files)
 - Per-project template overrides: place files in `projects/{project-name}/`
+
+**Important:** If your user prompt needs to contain literal curly braces (e.g., JSON examples), you must escape them by doubling: `{{` and `}}`. For example:
+```
+Return your answer as JSON: {{"score": 5, "reason": "explanation"}}
+```
+Without escaping, `{score}` would be interpreted as a placeholder for a dataset column.
+
+### Optimization Target
+
+Projects specify which prompt to optimize via `prompt_to_optimize` in metadata:
+- `"system"` (default) - Optimize the system prompt; user prompt stays constant
+- `"user"` - Optimize the user prompt template; system prompt stays constant
 
 ### Score Convention
 
@@ -105,7 +126,21 @@ Each dataset row gets a unique `_example_id` that persists across runs:
 
 The `cluster_failures()` function groups low-scoring examples by failure pattern:
 
-- Uses LLM with `clustering-prompt.jinja2` template
+- Uses LLM with `clustering-prompt.jinja2` template and structured output (Pydantic)
 - Returns 2-5 clusters with label, description, and example_ids
-- Parses JSON from LLM response with fallback handling via `parse_cluster_json()`
 - UI tracks coverage to ensure diverse example selection for optimization
+
+### Pydantic Metadata Models
+
+Project and run configuration use type-safe Pydantic models:
+
+- **ProjectMetadata** - Project settings: `project_name`, `dataset_name`, `split_ratio`, `eval_model`, `optimizer_model`, `stratify_column`, `prompt_to_optimize`, `created_at`
+- **RunMetadata** - Run settings: `run_name`, `created_at`, `parent_run`, `eval_completed`, `scores`, `analysis_text`, `selected_examples`
+
+### Parallel Evaluation
+
+Evaluation uses `ThreadPoolExecutor(max_workers=4)` for parallel LLM calls, providing ~4x speedup on multi-row datasets.
+
+### Template Validation
+
+The `validate_jinja_template()` function validates Jinja2 syntax before saving grader prompts, preventing runtime errors from malformed templates.

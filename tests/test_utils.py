@@ -8,6 +8,11 @@ import pandas as pd
 import pytest
 
 from utils import (
+    Cluster,
+    ClusterResponse,
+    EvalResponse,
+    GraderResponse,
+    ProjectMetadata,
     add_example_ids,
     bootstrap_ci,
     calculate_score_averages,
@@ -20,12 +25,12 @@ from utils import (
     load_project_metadata,
     load_prompt_file,
     paired_bootstrap_test,
-    parse_cluster_json,
     render_jinja_template,
     sample_size_guidance,
     save_project_metadata,
     save_prompt_file,
     split_dataset,
+    validate_jinja_template,
 )
 
 
@@ -121,6 +126,36 @@ class TestSplitDataset:
         pd.testing.assert_frame_equal(dev1, dev2)
         pd.testing.assert_frame_equal(test1, test2)
 
+    def test_invalid_ratio_format_no_slash(self):
+        df = pd.DataFrame({"text": ["a", "b", "c"]})
+        with pytest.raises(ValueError, match="Invalid split_ratio format"):
+            split_dataset(df, "40-40-20")
+
+    def test_invalid_ratio_format_wrong_parts(self):
+        df = pd.DataFrame({"text": ["a", "b", "c"]})
+        with pytest.raises(ValueError, match="Expected 3 values"):
+            split_dataset(df, "50/50")
+
+    def test_invalid_ratio_non_integer(self):
+        df = pd.DataFrame({"text": ["a", "b", "c"]})
+        with pytest.raises(ValueError, match="must be integers"):
+            split_dataset(df, "40.5/40.5/19")
+
+    def test_invalid_ratio_negative(self):
+        df = pd.DataFrame({"text": ["a", "b", "c"]})
+        with pytest.raises(ValueError, match="non-negative"):
+            split_dataset(df, "50/60/-10")
+
+    def test_invalid_ratio_not_sum_100(self):
+        df = pd.DataFrame({"text": ["a", "b", "c"]})
+        with pytest.raises(ValueError, match="sum to 100"):
+            split_dataset(df, "30/30/30")
+
+    def test_empty_dataframe_raises(self):
+        df = pd.DataFrame({"text": []})
+        with pytest.raises(ValueError, match="empty DataFrame"):
+            split_dataset(df, "40/40/20")
+
 
 class TestScoreUtilities:
     """Tests for score-related utilities."""
@@ -165,12 +200,23 @@ class TestFileUtilities:
         assert loaded == content
 
     def test_save_and_load_metadata(self, tmp_path):
-        metadata = {"project_name": "test", "created_at": "2024-01-01T00:00:00"}
+        from datetime import datetime
+
+        metadata = ProjectMetadata(
+            project_name="test",
+            dataset_name="test-dataset",
+            split_ratio="40/40/20",
+            eval_model="openai/gpt-4o-mini",
+            optimizer_model="anthropic/claude-sonnet-4-20250514",
+            created_at=datetime(2024, 1, 1, 0, 0, 0),
+        )
 
         save_project_metadata(str(tmp_path), metadata)
         loaded = load_project_metadata(str(tmp_path))
 
-        assert loaded == metadata
+        assert loaded.project_name == metadata.project_name
+        assert loaded.dataset_name == metadata.dataset_name
+        assert loaded.created_at == metadata.created_at
 
     def test_ensure_dir_creates_nested(self, tmp_path):
         nested_path = tmp_path / "a" / "b" / "c"
@@ -307,39 +353,120 @@ class TestExampleTracking:
         result = detect_regressions(history_df, ["baseline", "v2"])
         assert 1 in result["improved"]
 
+    def test_detect_regressions_broke_not_in_regressed(self):
+        """Broke examples should not also appear in regressed list."""
+        history_df = pd.DataFrame({
+            "_example_id": [1],
+            "baseline": [0.9],  # Passing (>= 0.7)
+            "v2": [0.3]         # Failing (< 0.5)
+        })
+        result = detect_regressions(history_df, ["baseline", "v2"])
+        # Should be in broke
+        assert 1 in result["broke"]
+        # Should NOT be in regressed (categories are mutually exclusive)
+        assert 1 not in result["regressed"]
 
-class TestParseClusterJson:
-    """Tests for JSON parsing from LLM responses."""
+    def test_detect_regressions_finds_oscillating(self):
+        history_df = pd.DataFrame({
+            "_example_id": [1],
+            "v1": [0.5],
+            "v2": [0.8],
+            "v3": [0.5]
+        })
+        result = detect_regressions(history_df, ["v1", "v2", "v3"])
+        assert 1 in result["oscillating"]
 
-    def test_parse_cluster_json_from_code_block(self):
-        response = '''Here is the analysis:
-```json
-{"clusters": [{"label": "Test", "description": "Test desc", "example_ids": [1, 2]}]}
-```
-'''
-        result = parse_cluster_json(response)
-        assert result is not None
-        assert "clusters" in result
-        assert len(result["clusters"]) == 1
 
-    def test_parse_cluster_json_raw(self):
-        response = '{"clusters": [{"label": "Test", "description": "Desc", "example_ids": [1]}]}'
-        result = parse_cluster_json(response)
-        assert result is not None
-        assert result["clusters"][0]["label"] == "Test"
+class TestPydanticModels:
+    """Tests for Pydantic models used in structured outputs."""
 
-    def test_parse_cluster_json_invalid(self):
-        response = "This is not valid JSON at all"
-        result = parse_cluster_json(response)
-        assert result is None
+    def test_eval_response_with_all_fields(self):
+        response = EvalResponse(
+            response="This is the response text.",
+            score=4.5,
+            reasoning="Good answer.",
+        )
+        assert response.response == "This is the response text."
+        assert response.score == 4.5
+        assert response.reasoning == "Good answer."
 
-    def test_parse_cluster_json_partial(self):
-        response = '''Some text before
-{"clusters": [{"label": "A", "description": "B", "example_ids": [1, 2, 3]}]}
-Some text after'''
-        result = parse_cluster_json(response)
-        assert result is not None
+    def test_eval_response_optional_fields(self):
+        response = EvalResponse(
+            response="Just a response.",
+            score=None,
+            reasoning=None,
+        )
+        assert response.response == "Just a response."
+        assert response.score is None
+        assert response.reasoning is None
 
-    def test_parse_cluster_json_empty_response(self):
-        result = parse_cluster_json("")
-        assert result is None
+    def test_grader_response(self):
+        response = GraderResponse(
+            relevance=0.85,
+            relevance_reason="Well-structured answer.",
+        )
+        assert response.relevance == 0.85
+        assert response.relevance_reason == "Well-structured answer."
+
+    def test_grader_response_bounds(self):
+        # Test that relevance is bounded 0-1
+        with pytest.raises(Exception):  # ValidationError
+            GraderResponse(relevance=1.5, relevance_reason="Too high")
+
+    def test_cluster_model(self):
+        cluster = Cluster(
+            label="Missing context",
+            description="Answers lack supporting details.",
+            example_ids=[1, 2, 3],
+        )
+        assert cluster.label == "Missing context"
+        assert len(cluster.example_ids) == 3
+
+    def test_cluster_response(self):
+        clusters = ClusterResponse(
+            clusters=[
+                Cluster(
+                    label="Type A",
+                    description="First pattern.",
+                    example_ids=[1, 2],
+                ),
+                Cluster(
+                    label="Type B",
+                    description="Second pattern.",
+                    example_ids=[3, 4, 5],
+                ),
+            ]
+        )
+        assert len(clusters.clusters) == 2
+        assert clusters.clusters[0].label == "Type A"
+        assert clusters.clusters[1].example_ids == [3, 4, 5]
+
+
+class TestTemplateValidation:
+    """Tests for Jinja2 template validation."""
+
+    def test_valid_template(self):
+        is_valid, error = validate_jinja_template("Hello {{ name }}!")
+        assert is_valid
+        assert error is None
+
+    def test_valid_template_with_loops(self):
+        template = "{% for item in items %}{{ item }}{% endfor %}"
+        is_valid, error = validate_jinja_template(template)
+        assert is_valid
+        assert error is None
+
+    def test_invalid_template_unclosed_variable(self):
+        is_valid, error = validate_jinja_template("Hello {{ name }")
+        assert not is_valid
+        assert "syntax error" in error.lower()
+
+    def test_invalid_template_unclosed_block(self):
+        is_valid, error = validate_jinja_template("{% for item in items %}")
+        assert not is_valid
+        assert error is not None
+
+    def test_empty_template_is_valid(self):
+        is_valid, error = validate_jinja_template("")
+        assert is_valid
+        assert error is None

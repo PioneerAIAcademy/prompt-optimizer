@@ -63,6 +63,38 @@ Open http://localhost:8501 in your browser.
 
 ---
 
+## Sample Data: BYU-Pathway Answer Evaluation
+
+The `samples/` directory contains a complete working example you can use immediately:
+
+| File | Description |
+|------|-------------|
+| `answer-evaluation.csv` | 153 examples of AI chatbot answer evaluation |
+| `system_prompt.txt` | Detailed grading rubric (1-5 scale) |
+| `user_prompt.txt` | User prompt template with placeholders |
+
+### Dataset Columns
+
+| Column | Description |
+|--------|-------------|
+| `question` | The question asked to the chatbot |
+| `human_answer` | The ideal human-written answer |
+| `ai_answer` | The AI-generated answer to evaluate |
+| `retrieved_content` | Source material the AI used (RAG context) |
+| `expected_score` | Human score (1-5) rating the AI answer quality |
+
+### Using the Sample Data
+
+1. Go to **Create Project** tab
+2. Upload `samples/answer-evaluation.csv`
+3. Copy contents of `samples/system_prompt.txt` into the System Prompt field
+4. Copy contents of `samples/user_prompt.txt` into the User Prompt Template field
+5. Create project and start evaluating
+
+This example evaluates how well an AI chatbot answers questions by comparing AI responses to ideal human answers. The grading rubric in the system prompt defines scores from 1 (contradictory) to 5 (semantically equivalent).
+
+---
+
 ## Tutorial: Your First Optimization
 
 Let's walk through a complete example. You'll create a grading assistant that evaluates student answers.
@@ -88,8 +120,8 @@ question,context,answer,expected_score
 1. Go to the **Create Project** tab
 2. Enter a project name: `grading-assistant`
 3. Upload your CSV file
-4. Set the **Evaluation Model** (the model that runs your prompt): `openai/gpt-4o-mini`
-5. Set the **Optimizer Model** (the model that improves your prompt): `anthropic/claude-sonnet-4-20250514`
+4. Set the **Evaluation Model** (the model that runs your prompt): `openai/responses/gpt-5-mini`
+5. Set the **Optimizer Model** (the model that improves your prompt): `anthropic/claude-opus-4-5-20251101`
 
 Now write your initial prompt:
 
@@ -112,6 +144,12 @@ Please evaluate this answer.
 ```
 
 Notice the `{question}`, `{context}`, and `{answer}` placeholders - these get filled in with values from each row of your CSV.
+
+> **Note:** Only the User Prompt Template supports `{column}` placeholders. The System Prompt is static and passed to the LLM unchanged for every row.
+
+> **Tip:** If your user prompt needs literal curly braces (e.g., JSON examples), escape them by doubling: `{{` and `}}`. For example: `Return JSON: {{"score": 5}}`
+
+Finally, select your **Optimization Target** - whether you want to iteratively improve the System Prompt or the User Prompt Template. The other prompt will remain constant across all optimization runs.
 
 Click **Create Project**.
 
@@ -169,10 +207,11 @@ This is where you set up a new optimization project:
 | **Project Name** | Unique identifier for your project |
 | **Dataset** | Your CSV file with test examples |
 | **Split Ratio** | How to divide data (40% train / 40% dev / 20% test is default) |
-| **Evaluation Model** | The LLM that runs your prompt (use a fast/cheap model like `gpt-4o-mini`) |
-| **Optimizer Model** | The LLM that generates improved prompts (use a smart model like `claude-sonnet`) |
-| **System Prompt** | Instructions for the LLM |
+| **Evaluation Model** | The LLM that runs your prompt (use a fast/cheap model like `gpt-5-mini`) |
+| **Optimizer Model** | The LLM that generates improved prompts (use a smart model like `claude-opus-4-5`) |
+| **System Prompt** | Instructions for the LLM (static, no placeholders) |
 | **User Prompt Template** | Template with `{column}` placeholders for your data |
+| **Optimization Target** | Which prompt to improve: System Prompt or User Prompt Template |
 
 ### Tab 2: Evaluate
 
@@ -265,10 +304,10 @@ Reasoning: [your explanation]
 
 When choosing failures to learn from:
 
-1. **Pick diverse failures** - Don't select 5 examples of the same problem
-2. **Use clustering** - The cluster feature helps ensure coverage of different failure types
-3. **Include edge cases** - Examples that are tricky or unusual
-4. **Quality over quantity** - 3-5 well-chosen examples beat 10 random ones
+1. **Cover your failure clusters** - Aim for at least 1-2 representative examples per cluster. If clustering identifies 4 failure modes, select 4-8 examples, not a fixed number.
+2. **Use clustering first** - Run "Cluster Failures" to understand the failure landscape before selecting examples
+3. **Pick clear failures** - Choose unambiguous failures over edge cases. The optimizer learns better from clear patterns.
+4. **Diversity over volume** - 5-8 well-chosen examples covering different clusters beat 15 random ones. The goal is coverage, not quantity.
 
 ### Writing Good Initial Prompts
 
@@ -312,7 +351,7 @@ def eval(row, system_prompt, user_prompt_template, model) -> dict:
     user_prompt = format_user_prompt(user_prompt_template, row)
     response = call_llm(system_prompt, user_prompt, model)
 
-    outputs = {"llm_response": response}
+    outputs = {"response": response}
 
     # Parse JSON from response
     import json
@@ -328,6 +367,81 @@ def eval(row, system_prompt, user_prompt_template, model) -> dict:
 ### Use a Custom Optimizer Prompt
 
 Create `projects/your-project/prompt-optimizer-prompt.jinja2` to override the default optimizer template.
+
+### Change How Dataset Is Split
+
+Edit the `stratify()` function to control stratification:
+
+```python
+def stratify(df) -> str | None:
+    # Stratify on difficulty to ensure each split has similar distribution
+    if 'difficulty' in df.columns:
+        return 'difficulty'
+    return None  # Random split
+```
+
+The default looks for common columns like `category`, `label`, or `difficulty`.
+
+### Change How Prompts Are Optimized
+
+Edit the `optimize()` function to customize how improved prompts are generated:
+
+```python
+def optimize(optimizer_prompt_template, system_prompt, user_prompt_template,
+             examples, analysis, model) -> str:
+    formatted_prompt = render_jinja_template(
+        optimizer_prompt_template,
+        system_prompt=system_prompt,
+        user_prompt_template=user_prompt_template,
+        examples=examples,
+        analysis=analysis,
+    )
+
+    response = call_llm_single_prompt(formatted_prompt, model, temperature=0.7)
+
+    # Extract from <optimized_prompt> tags, or return full response
+    prompt_match = re.search(r"<optimized_prompt>(.*?)</optimized_prompt>",
+                             response, re.DOTALL)
+    if prompt_match:
+        return prompt_match.group(1).strip()
+    return response.strip()
+```
+
+### Change How Errors Are Analyzed
+
+Edit the `analyze()` function to customize error pattern identification:
+
+```python
+def analyze(rows, analysis_prompt_template, model) -> str:
+    formatted_prompt = render_jinja_template(analysis_prompt_template, rows=rows)
+    return call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+```
+
+You can also override the analysis template by creating `projects/your-project/analysis-prompt.jinja2`.
+
+### Change How Failures Are Clustered
+
+Edit the `cluster_failures()` function to customize how low-scoring examples are grouped:
+
+```python
+def cluster_failures(rows, clustering_prompt_template, score_column,
+                     model, max_clusters=5) -> dict:
+    formatted_prompt = render_jinja_template(
+        clustering_prompt_template,
+        failures=rows,
+        score_column=score_column,
+        max_clusters=max_clusters
+    )
+
+    # Uses structured output with Pydantic ClusterResponse model
+    result = call_llm_structured(formatted_prompt, model, ClusterResponse)
+
+    return {
+        "clusters": [cluster.model_dump() for cluster in result.clusters],
+    }
+```
+
+Override the clustering template with `projects/your-project/clustering-prompt.jinja2`.
 
 ---
 
@@ -359,14 +473,15 @@ This app uses [LiteLLM](https://docs.litellm.ai/) which supports many providers:
 
 | Provider | Model format | API key env var |
 |----------|--------------|-----------------|
-| OpenAI | `openai/gpt-4o-mini` | `OPENAI_API_KEY` |
-| Anthropic | `anthropic/claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
-| Azure | `azure/your-deployment` | `AZURE_API_KEY`, `AZURE_API_BASE` |
+| OpenAI | `openai/responses/gpt-5-mini` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-opus-4-5-20251101` | `ANTHROPIC_API_KEY` |
+| Google | `gemini/gemini-2.5-flash-preview-05-20` | `GEMINI_API_KEY` |
 
 Create a `.env` file:
 ```bash
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=...
 ```
 
 ---
@@ -406,9 +521,9 @@ Go to the Evaluate tab and run evaluation before trying to optimize.
 Scores need paired keys (`accuracy` + `accuracy_reason`). Check your `score()` function in `config.py`.
 
 ### Slow Evaluation
-- Use a faster model like `gpt-4o-mini` for evaluation
+- Use a faster model like `gpt-5-mini` for evaluation
 - Reduce dataset size for initial testing
-- Processing is sequential, so large datasets take time
+- Evaluation runs 4 parallel threads by default, but API rate limits may still slow large datasets
 
 ---
 
@@ -420,6 +535,7 @@ Scores need paired keys (`accuracy` + `accuracy_reason`). Check your `score()` f
 | **Split** | Division of data: train (for learning), dev (for tuning), test (for final evaluation) |
 | **Evaluation** | Running your prompt against all examples and recording results |
 | **Optimization** | Using an AI to generate an improved prompt based on failures |
+| **Optimization Target** | Which prompt to improve (system or user); the other stays constant |
 | **Confidence Interval** | Range showing uncertainty in a score (e.g., 0.75 +/- 0.05) |
 | **Regression** | When a change breaks something that was previously working |
 | **Clustering** | Grouping similar failures together to understand patterns |
@@ -434,7 +550,7 @@ A: At least 20 for basic testing, 50+ for reliable statistics, 100+ for detectin
 
 **Q: Should I use the same model for evaluation and optimization?**
 
-A: Not necessarily. Use a fast/cheap model (like `gpt-4o-mini`) for evaluation since you're running it many times. Use a smarter model (like `claude-sonnet`) for optimization since it only runs once per iteration.
+A: Not necessarily. Use a fast/cheap model (like `gpt-5-mini`) for evaluation since you're running it many times. Use a smarter model (like `claude-opus-4-5`) for optimization since it only runs once per iteration.
 
 **Q: How do I know when to stop optimizing?**
 
@@ -453,3 +569,11 @@ A: Try:
 **Q: Can I use this for classification tasks?**
 
 A: Yes. Set up your scoring to compare the extracted classification against expected labels.
+
+**Q: Should I optimize the system prompt or user prompt?**
+
+A: It depends on your use case:
+- **Optimize System Prompt** (default): Best for improving instructions, rubrics, and behavioral guidelines. The system prompt is static (no placeholders).
+- **Optimize User Prompt Template**: Best when you want to improve how data is presented to the LLM. The user prompt template contains `{column}` placeholders that get filled with dataset values.
+
+Only the user prompt supports placeholders - the system prompt is passed unchanged for every row.

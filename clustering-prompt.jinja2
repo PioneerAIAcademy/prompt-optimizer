@@ -1,3 +1,18 @@
+{#
+  Failure Clustering Template
+
+  Purpose: Groups failure examples into clusters based on common error patterns.
+           Used with structured output (ClusterResponse Pydantic model).
+
+  Required Variables:
+    - failures: list[dict] - Failure examples, each with _example_id and score data
+    - score_column: str - Name of the score column being analyzed
+    - max_clusters: int - Maximum number of clusters to generate (2-5)
+
+  Output Format:
+    Returns structured JSON via Pydantic ClusterResponse model with:
+    - clusters: list of {label, description, example_ids}
+#}
 You are an expert at analyzing LLM evaluation failures to identify patterns.
 
 ## Task
@@ -13,12 +28,12 @@ For each cluster, provide:
 {% for ex in failures %}
 ### Example ID: {{ ex._example_id }}
 {% for key, value in ex.items() %}
-{% if key not in ['llm_response', '_example_id'] and not key.endswith('_reason') and not key.startswith('extracted_') %}
+{% if key not in ['response', '_example_id'] and not key.endswith('_reason') %}
 **{{ key }}**: {{ value | string | truncate(200) }}
 {% endif %}
 {% endfor %}
 
-**LLM Response**: {{ ex.llm_response | default("No response") | truncate(400) }}
+**LLM Response**: {{ ex.response | default("No response") | truncate(400) }}
 
 **Score**: {{ ex[score_column] | default("N/A") }}
 {% if ex[score_column ~ '_reason'] is defined %}
@@ -27,18 +42,3 @@ For each cluster, provide:
 
 ---
 {% endfor %}
-
-## Output Format
-Respond with valid JSON only, no other text:
-
-```json
-{
-  "clusters": [
-    {
-      "label": "Short descriptive label",
-      "description": "One sentence describing the common failure pattern",
-      "example_ids": [1, 2, 3]
-    }
-  ]
-}
-```

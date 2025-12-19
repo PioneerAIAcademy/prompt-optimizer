@@ -1,3 +1,20 @@
+{#
+  Error Analysis Template
+
+  Purpose: Analyzes evaluation results to identify common error patterns and
+           provide actionable insights for prompt improvement.
+
+  Required Variables:
+    - rows: list[dict] - Evaluation results, each containing input data,
+            response, and score columns with their reasons
+
+  Output Format:
+    Free-form text analysis (3-5 paragraphs) describing:
+    - Common error patterns or failure modes
+    - Types of inputs where the model struggles
+    - Systematic issues in the model's responses
+    - Specific improvements that could address these issues
+#}
 You are an expert at analyzing LLM evaluation results to identify patterns and common failure modes.
 
 ## Task
@@ -12,17 +29,17 @@ Analyze the following evaluation results and identify:
 ### Example {{ loop.index }}
 **Input:**
 {% for key, value in row.items() %}
-{% if key not in ['llm_response', 'error'] and not key.endswith('_reason') and not key.startswith('extracted_') %}
+{% if key not in ['response', 'error'] and not key.endswith('_reason') %}
 - {{ key }}: {{ value | truncate(200) }}
 {% endif %}
 {% endfor %}
 
 **LLM Response:**
-{{ row.llm_response | default("No response") | truncate(500) }}
+{{ row.response | default("No response") | truncate(500) }}
 
 **Scores:**
 {% for key, value in row.items() %}
-{% if not key.endswith('_reason') and key not in ['llm_response'] and value is number %}
+{% if not key.endswith('_reason') and key not in ['response'] and value is number %}
 - {{ key }}: {{ value }}{% if row[key ~ '_reason'] is defined %} - {{ row[key ~ '_reason'] | truncate(100) }}{% endif %}
 {% endif %}
 {% endfor %}

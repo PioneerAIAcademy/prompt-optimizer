@@ -4,17 +4,82 @@ Reusable utilities for the prompt optimizer app.
 
 import json
 import os
-import re
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 import litellm
 import numpy as np
 import pandas as pd
 from jinja2 import Template
+from pydantic import BaseModel, Field
 from sklearn.model_selection import train_test_split
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+
+# =============================================================================
+# PYDANTIC MODELS FOR STRUCTURED OUTPUTS
+# =============================================================================
+
+
+class EvalResponse(BaseModel):
+    """Response from evaluation LLM call."""
+
+    response: str = Field(..., description="The main response text")
+    score: float | None = Field(None, description="Self-assessment score if requested")
+    reasoning: str | None = Field(None, description="Explanation for the score")
+
+
+class GraderResponse(BaseModel):
+    """Response from LLM-as-judge grading."""
+
+    relevance: float = Field(..., ge=0.0, le=1.0, description="Relevance score 0-1")
+    relevance_reason: str = Field(..., description="Explanation for relevance score")
+
+
+class Cluster(BaseModel):
+    """A single failure cluster."""
+
+    label: str = Field(..., description="Short descriptive label (3-5 words)")
+    description: str = Field(..., description="One sentence describing the pattern")
+    example_ids: list[int | str] = Field(
+        ..., description="IDs of examples in this cluster"
+    )
+
+
+class ClusterResponse(BaseModel):
+    """Response from failure clustering."""
+
+    clusters: list[Cluster]
+
+
+# =============================================================================
+# METADATA MODELS
+# =============================================================================
+
+
+class ProjectMetadata(BaseModel):
+    """Project configuration and settings."""
+
+    project_name: str
+    dataset_name: str
+    split_ratio: str
+    eval_model: str
+    optimizer_model: str
+    stratify_column: str | None = None
+    prompt_to_optimize: Literal["system", "user"] = "system"
+    created_at: datetime
+
+
+class RunMetadata(BaseModel):
+    """Run configuration and results."""
+
+    run_name: str
+    created_at: datetime
+    parent_run: str | None = None
+    eval_completed: bool = False
+    scores: dict[str, dict[str, float]] | None = None
+    analysis_text: str | None = None
+    selected_examples: list[int] | None = None
 
 
 # =============================================================================
@@ -81,78 +146,84 @@ def call_llm_single_prompt(prompt: str, model: str, temperature: float = 0.7) ->
     return response.choices[0].message.content
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def call_llm_structured(
+    prompt: str,
+    model: str,
+    response_model: type[BaseModel],
+    temperature: float = 0.0,
+    system_prompt: str | None = None,
+) -> BaseModel:
+    """
+    Call an LLM with structured output using response_format.
+
+    Args:
+        prompt: The user prompt text
+        model: LiteLLM model string
+        response_model: Pydantic model class for the expected response
+        temperature: Sampling temperature (default 0.0 for determinism)
+        system_prompt: Optional system message for context
+
+    Returns:
+        An instance of the response_model with the parsed response
+
+    Example:
+        >>> result = call_llm_structured(
+        ...     prompt="Evaluate this answer...",
+        ...     model="openai/gpt-4o-mini",
+        ...     response_model=EvalResponse
+        ... )
+        >>> print(result.score, result.reasoning)
+    """
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    response = litellm.completion(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        response_format=response_model,
+    )
+    return response_model.model_validate_json(response.choices[0].message.content)
+
+
 class EvaluationError(Exception):
     """Raised when evaluation fails and should stop."""
 
     pass
 
 
-def call_llm_parallel(
-    tasks: list[dict],
-    model: str,
-    max_workers: int = 5,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> list[dict]:
-    """
-    Execute multiple LLM calls in parallel with retry.
-    Raises EvaluationError if any task fails after retries.
-
-    Args:
-        tasks: List of dicts with 'system_prompt', 'user_prompt', and 'row_data'
-        model: LiteLLM model string
-        max_workers: Maximum concurrent requests
-        on_progress: Optional callback(completed, total) for progress updates
-
-    Returns:
-        List of dicts with original row_data plus 'llm_response' key
-
-    Raises:
-        EvaluationError: If any LLM call fails after retries
-
-    Example:
-        >>> tasks = [
-        ...     {"system_prompt": "...", "user_prompt": "...", "row_data": {"id": 1}},
-        ...     {"system_prompt": "...", "user_prompt": "...", "row_data": {"id": 2}},
-        ... ]
-        >>> results = call_llm_parallel(tasks, "openai/gpt-4o-mini")
-    """
-    results: list[dict] = []
-    completed = 0
-    error_occurred: Exception | None = None
-
-    def process_task(task: dict) -> dict:
-        response = call_llm(task["system_prompt"], task["user_prompt"], model)
-        return {**task["row_data"], "llm_response": response}
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_task, task): task for task in tasks}
-
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                error_occurred = e
-                # Cancel remaining futures
-                for f in futures:
-                    f.cancel()
-                break
-
-            completed += 1
-            if on_progress:
-                on_progress(completed, len(tasks))
-
-    if error_occurred:
-        raise EvaluationError(
-            f"Evaluation failed after retries: {error_occurred}"
-        ) from error_occurred
-
-    return results
-
-
 # =============================================================================
 # TEMPLATE UTILITIES
 # =============================================================================
+
+
+def validate_jinja_template(template_str: str) -> tuple[bool, str | None]:
+    """
+    Validate Jinja2 template syntax.
+
+    Args:
+        template_str: The template string to validate
+
+    Returns:
+        Tuple of (is_valid, error_message).
+        If valid, error_message is None.
+
+    Example:
+        >>> is_valid, error = validate_jinja_template("Hello {{ name }}!")
+        >>> assert is_valid
+        >>> is_valid, error = validate_jinja_template("Hello {{ name }")
+        >>> assert not is_valid
+    """
+    from jinja2 import TemplateSyntaxError
+
+    try:
+        Template(template_str)
+        return (True, None)
+    except TemplateSyntaxError as e:
+        return (False, f"Template syntax error at line {e.lineno}: {e.message}")
 
 
 def render_jinja_template(template_str: str, **kwargs: Any) -> str:
@@ -196,60 +267,6 @@ def format_user_prompt(template: str, row: dict) -> str:
     return template.format(**row)
 
 
-def parse_cluster_json(response: str) -> dict | None:
-    """
-    Extract and parse JSON from LLM response.
-
-    Handles various formats:
-    - Raw JSON
-    - JSON wrapped in markdown code blocks
-    - JSON with surrounding text
-
-    Args:
-        response: Raw LLM response
-
-    Returns:
-        Parsed dict or None if parsing fails
-    """
-    if not response or not response.strip():
-        return None
-
-    # Try to find JSON in markdown code block (greedy match for nested braces)
-    code_block_match = re.search(r'```(?:json)?\s*(\{.+\})\s*```', response, re.DOTALL)
-    if code_block_match:
-        try:
-            return json.loads(code_block_match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Try to find a JSON object containing "clusters" by finding balanced braces
-    # Look for the outermost { } that contains "clusters"
-    start_idx = response.find('{"clusters"')
-    if start_idx == -1:
-        start_idx = response.find('{ "clusters"')
-    if start_idx != -1:
-        # Find matching closing brace
-        depth = 0
-        for i, char in enumerate(response[start_idx:]):
-            if char == '{':
-                depth += 1
-            elif char == '}':
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(response[start_idx:start_idx + i + 1])
-                    except json.JSONDecodeError:
-                        break
-
-    # Try the whole response as JSON
-    try:
-        return json.loads(response.strip())
-    except json.JSONDecodeError:
-        pass
-
-    return None
-
-
 # =============================================================================
 # DATASET UTILITIES
 # =============================================================================
@@ -266,22 +283,44 @@ def split_dataset(
 
     Args:
         df: Input DataFrame
-        split_ratio: Ratio string like "40/40/20"
+        split_ratio: Ratio string like "40/40/20" (must sum to 100)
         stratify_column: Column to stratify on (optional)
         random_state: Random seed for reproducibility
 
     Returns:
         Tuple of (train_df, dev_df, test_df)
 
+    Raises:
+        ValueError: If split_ratio is invalid or dataset is empty
+
     Example:
         >>> train, dev, test = split_dataset(df, "40/40/20", stratify_column="label")
     """
+    # Validate input DataFrame
+    if len(df) == 0:
+        raise ValueError("Cannot split empty DataFrame")
+
     # Add example IDs before splitting so they're preserved
     df = add_example_ids(df)
 
-    # Parse ratio
-    train_pct, dev_pct, test_pct = map(int, split_ratio.split("/"))
-    assert train_pct + dev_pct + test_pct == 100, "Split ratios must sum to 100"
+    # Validate and parse ratio
+    if "/" not in split_ratio:
+        raise ValueError(f"Invalid split_ratio format: '{split_ratio}'. Expected format like '40/40/20'")
+
+    parts = split_ratio.split("/")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid split_ratio: '{split_ratio}'. Expected 3 values separated by '/'")
+
+    try:
+        train_pct, dev_pct, test_pct = map(int, parts)
+    except ValueError as e:
+        raise ValueError(f"Split ratios must be integers: {e}")
+
+    if train_pct < 0 or dev_pct < 0 or test_pct < 0:
+        raise ValueError(f"Split ratios must be non-negative: {split_ratio}")
+
+    if train_pct + dev_pct + test_pct != 100:
+        raise ValueError(f"Split ratios must sum to 100, got {train_pct + dev_pct + test_pct}")
 
     # Calculate sizes
     n = len(df)
@@ -342,32 +381,46 @@ def split_dataset(
     )
 
 
-def load_project_metadata(project_path: str) -> dict:
-    """Load project metadata.json."""
+def load_project_metadata(project_path: str) -> ProjectMetadata:
+    """
+    Load project metadata.json as Pydantic model.
+
+    Raises:
+        FileNotFoundError: If metadata file doesn't exist
+        ValidationError: If metadata is invalid
+    """
     metadata_path = os.path.join(project_path, "metadata.json")
-    with open(metadata_path) as f:
-        return json.load(f)
+    with open(metadata_path, encoding="utf-8") as f:
+        data = json.load(f)
+    return ProjectMetadata.model_validate(data)
 
 
-def save_project_metadata(project_path: str, metadata: dict) -> None:
-    """Save project metadata.json."""
+def save_project_metadata(project_path: str, metadata: ProjectMetadata) -> None:
+    """Save project metadata.json from Pydantic model."""
     metadata_path = os.path.join(project_path, "metadata.json")
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        f.write(metadata.model_dump_json(indent=2))
 
 
-def load_run_metadata(run_path: str) -> dict:
-    """Load run metadata.json."""
+def load_run_metadata(run_path: str) -> RunMetadata:
+    """
+    Load run metadata.json as Pydantic model.
+
+    Raises:
+        FileNotFoundError: If metadata file doesn't exist
+        ValidationError: If metadata is invalid
+    """
     metadata_path = os.path.join(run_path, "metadata.json")
-    with open(metadata_path) as f:
-        return json.load(f)
+    with open(metadata_path, encoding="utf-8") as f:
+        data = json.load(f)
+    return RunMetadata.model_validate(data)
 
 
-def save_run_metadata(run_path: str, metadata: dict) -> None:
-    """Save run metadata.json."""
+def save_run_metadata(run_path: str, metadata: RunMetadata) -> None:
+    """Save run metadata.json from Pydantic model."""
     metadata_path = os.path.join(run_path, "metadata.json")
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        f.write(metadata.model_dump_json(indent=2))
 
 
 def list_projects(projects_dir: str = "./projects") -> list[str]:
@@ -380,7 +433,9 @@ def list_projects(projects_dir: str = "./projects") -> list[str]:
 
 
 def list_runs(project_path: str) -> list[str]:
-    """List all run names in a project."""
+    """List all run names in a project. Returns empty list if path doesn't exist."""
+    if not os.path.exists(project_path):
+        return []
     return [
         d for d in os.listdir(project_path) if os.path.isdir(os.path.join(project_path, d))
     ]
@@ -706,33 +761,42 @@ def detect_regressions(
     oscillating = []
     broke = []
 
+    # Thresholds for detecting changes (use math.isclose-style tolerance)
+    IMPROVEMENT_THRESHOLD = 0.05
+    OSCILLATION_THRESHOLD = 0.02
+
     for _, row in history_df.iterrows():
         example_id = row["_example_id"]
+        # Filter out NaN values while preserving order
         scores = [row.get(run) for run in run_names if run in row and pd.notna(row.get(run))]
 
         if len(scores) < 2:
             continue
 
-        first_score = scores[0]
-        last_score = scores[-1]
+        first_score = float(scores[0])
+        last_score = float(scores[-1])
 
-        # Check for broke (passed initially, fails now)
-        if first_score >= pass_threshold and last_score < fail_threshold:
+        # Check for broke (passed initially, fails now) - mutually exclusive with improved/regressed
+        is_broke = first_score >= pass_threshold and last_score < fail_threshold
+        if is_broke:
             broke.append(example_id)
+            # Don't add to regressed since "broke" is more specific
+            continue
 
-        # Check for improvement vs regression
-        if last_score > first_score + 0.05:
+        # Check for improvement vs regression (mutually exclusive)
+        if last_score > first_score + IMPROVEMENT_THRESHOLD:
             improved.append(example_id)
-        elif last_score < first_score - 0.05:
+        elif last_score < first_score - IMPROVEMENT_THRESHOLD:
             regressed.append(example_id)
 
         # Check for oscillation (changed direction at least once)
+        # This can overlap with improved/regressed since it's a different metric
         if len(scores) >= 3:
             directions = []
             for i in range(1, len(scores)):
-                if scores[i] > scores[i-1] + 0.02:
+                if scores[i] > scores[i-1] + OSCILLATION_THRESHOLD:
                     directions.append("up")
-                elif scores[i] < scores[i-1] - 0.02:
+                elif scores[i] < scores[i-1] - OSCILLATION_THRESHOLD:
                     directions.append("down")
 
             if len(directions) >= 2 and len(set(directions)) > 1:
@@ -746,13 +810,22 @@ def detect_regressions(
     }
 
 
-def get_trend_label(scores: list[float], run_names: list[str]) -> str:
+def get_trend_label(
+    scores: list[float],
+    run_names: list[str],
+    improvement_threshold: float = 0.05,
+    pass_threshold: float = 0.7,
+    fail_threshold: float = 0.5,
+) -> str:
     """
     Get a human-readable trend label for an example's score history.
 
     Args:
         scores: List of scores (aligned with run_names)
         run_names: List of run names
+        improvement_threshold: Minimum difference to count as improvement/regression
+        pass_threshold: Score above which example is "passing"
+        fail_threshold: Score below which example is "failing"
 
     Returns:
         Trend label string
@@ -760,20 +833,20 @@ def get_trend_label(scores: list[float], run_names: list[str]) -> str:
     if len(scores) < 2:
         return ""
 
-    first = scores[0]
-    last = scores[-1]
+    first = float(scores[0])
+    last = float(scores[-1])
 
     if len(scores) >= 3:
         # Check for oscillation
-        went_up = any(scores[i] > scores[i-1] + 0.05 for i in range(1, len(scores)))
-        went_down = any(scores[i] < scores[i-1] - 0.05 for i in range(1, len(scores)))
+        went_up = any(scores[i] > scores[i-1] + improvement_threshold for i in range(1, len(scores)))
+        went_down = any(scores[i] < scores[i-1] - improvement_threshold for i in range(1, len(scores)))
         if went_up and went_down:
             return "Oscillating"
 
-    if last > first + 0.05:
+    if last > first + improvement_threshold:
         return "Improving"
-    elif last < first - 0.05:
-        if first >= 0.7 and last < 0.5:
+    elif last < first - improvement_threshold:
+        if first >= pass_threshold and last < fail_threshold:
             return f"Broke in {run_names[-1]}"
         return f"Regressed from {run_names[0]}"
     else:

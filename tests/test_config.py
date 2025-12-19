@@ -7,6 +7,7 @@ These tests use mocking to avoid actual LLM calls.
 from unittest.mock import MagicMock, patch
 
 import config
+from utils import EvalResponse, GraderResponse
 
 
 class TestStratify:
@@ -34,10 +35,12 @@ class TestStratify:
 class TestEval:
     """Tests for eval function."""
 
-    @patch("config.call_llm")
+    @patch("config.call_llm_structured")
     def test_basic_eval(self, mock_llm):
-        mock_llm.return_value = (
-            "Analysis complete.\n**Score:** 4.5\nReasoning: The answer is good."
+        mock_llm.return_value = EvalResponse(
+            response="Analysis complete. The answer is good.",
+            score=4.5,
+            reasoning="The answer is accurate and well-explained.",
         )
 
         row = {"question": "What is AI?", "answer": "Artificial Intelligence"}
@@ -48,13 +51,17 @@ class TestEval:
             model="test-model",
         )
 
-        assert "llm_response" in result
-        assert result["extracted_score"] == 4.5
-        assert "extracted_reasoning" in result
+        assert "response" in result
+        assert result["score"] == 4.5
+        assert "reasoning" in result
 
-    @patch("config.call_llm")
+    @patch("config.call_llm_structured")
     def test_missing_score_in_response(self, mock_llm):
-        mock_llm.return_value = "This response has no score."
+        mock_llm.return_value = EvalResponse(
+            response="This response has no score.",
+            score=None,
+            reasoning=None,
+        )
 
         row = {"question": "Test"}
         result = config.eval(
@@ -64,8 +71,8 @@ class TestEval:
             model="test-model",
         )
 
-        assert "llm_response" in result
-        assert "extracted_score" not in result
+        assert "response" in result
+        assert "score" not in result
 
 
 class TestScore:
@@ -73,9 +80,9 @@ class TestScore:
 
     def test_accuracy_calculation(self):
         row = {
-            "extracted_score": 4.0,
+            "score": 4.0,
             "expected_score": 4.5,
-            "llm_response": "Some response",
+            "response": "Some response",
         }
 
         result = config.score(row, grader_prompt=None, model="test-model")
@@ -86,30 +93,34 @@ class TestScore:
 
     def test_perfect_score(self):
         row = {
-            "extracted_score": 5.0,
+            "score": 5.0,
             "expected_score": 5.0,
-            "llm_response": "Response",
+            "response": "Response",
         }
 
         result = config.score(row, grader_prompt=None, model="test-model")
 
         assert result["accuracy"] == 1.0
 
-    @patch("config.call_llm_single_prompt")
+    @patch("config.call_llm_structured")
     def test_with_grader_prompt(self, mock_llm):
-        mock_llm.return_value = "Quality: 8/10. Good response."
+        mock_llm.return_value = GraderResponse(
+            relevance=0.8,
+            relevance_reason="Good response with accurate information.",
+        )
 
         row = {
-            "llm_response": "Test response",
+            "response": "Test response",
             "question": "Test question",
         }
-        grader_prompt = "Rate this: {{ row.llm_response }}"
+        grader_prompt = "Rate this: {{ row.response }}"
 
-        _result = config.score(row, grader_prompt=grader_prompt, model="test-model")
+        result = config.score(row, grader_prompt=grader_prompt, model="test-model")
 
         # Should have called the LLM
         mock_llm.assert_called_once()
-        assert _result is not None
+        assert result["relevance"] == 0.8
+        assert "relevance_reason" in result
 
 
 class TestOptimize:

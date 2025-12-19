@@ -82,17 +82,17 @@ Reasoning: [your reasoning]"""
             model="openai/gpt-4o-mini",
         )
 
-        assert "llm_response" in result
-        assert len(result["llm_response"]) > 0
+        assert "response" in result
+        assert len(result["response"]) > 0
         # Score extraction is best-effort, may or may not succeed
 
     def test_score_function_without_grader(self):
         import config
 
         row = {
-            "extracted_score": 4.0,
+            "score": 4.0,
             "expected_score": 4.5,
-            "llm_response": "Some response text",
+            "response": "Some response text",
         }
 
         result = config.score(row, grader_prompt=None, model="openai/gpt-4o-mini")
@@ -255,7 +255,7 @@ Reasoning: [text]"""
 
         # Verify we have results
         assert len(results_df) > 0
-        assert "llm_response" in results_df.columns
+        assert "response" in results_df.columns
 
         # 6. Calculate averages
         score_cols = extract_score_columns(results_df)
@@ -334,32 +334,24 @@ class TestClusterFailuresE2E:
 
         # Check structure
         assert "clusters" in result
-        assert "raw_response" in result
-        assert "success" in result
+        assert len(result["clusters"]) >= 1
+        assert len(result["clusters"]) <= 3
 
-        # If successful, verify cluster structure
-        if result["success"]:
-            assert len(result["clusters"]) >= 1
-            assert len(result["clusters"]) <= 3
+        for cluster in result["clusters"]:
+            assert "label" in cluster
+            assert "description" in cluster
+            assert "example_ids" in cluster
+            assert isinstance(cluster["example_ids"], list)
 
-            for cluster in result["clusters"]:
-                assert "label" in cluster
-                assert "description" in cluster
-                assert "example_ids" in cluster
-                assert isinstance(cluster["example_ids"], list)
+        # Verify all example IDs are from our input
+        all_ids = set()
+        for cluster in result["clusters"]:
+            all_ids.update(cluster["example_ids"])
+        valid_ids = {1, 2, 3, 4}
+        assert all_ids.issubset(valid_ids), f"Invalid IDs found: {all_ids - valid_ids}"
 
-            # Verify all example IDs are from our input
-            all_ids = set()
-            for cluster in result["clusters"]:
-                all_ids.update(cluster["example_ids"])
-            valid_ids = {1, 2, 3, 4}
-            assert all_ids.issubset(valid_ids), f"Invalid IDs found: {all_ids - valid_ids}"
-
-            print("\n=== Clustering Results ===")
-            for i, cluster in enumerate(result["clusters"]):
-                print(f"Cluster {i+1}: {cluster['label']}")
-                print(f"  Description: {cluster['description']}")
-                print(f"  IDs: {cluster['example_ids']}")
-        else:
-            print("\nClustering failed to parse. Raw response:")
-            print(result["raw_response"][:500])
+        print("\n=== Clustering Results ===")
+        for i, cluster in enumerate(result["clusters"]):
+            print(f"Cluster {i+1}: {cluster['label']}")
+            print(f"  Description: {cluster['description']}")
+            print(f"  IDs: {cluster['example_ids']}")
