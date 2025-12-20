@@ -8,6 +8,11 @@
     - rows: list[dict] - Evaluation results, each containing input data,
             response, and score columns with their reasons
 
+  Optional Variables:
+    - total_examples: int | None - Total number of examples in the dataset
+    - score_summary: str | None - Pre-computed score summary text
+    - stratify_column: str | None - Column name used for stratification/reference
+
   Output Format:
     Free-form text analysis (3-5 paragraphs) describing:
     - Common error patterns or failure modes
@@ -17,30 +22,49 @@
 #}
 You are an expert at analyzing LLM evaluation results to identify patterns and common failure modes.
 
+{% if total_examples is defined %}
+## Context
+Analyzing {{ rows|length }} low-scoring examples out of {{ total_examples }} total ({{ "%.0f"|format(100 * rows|length / total_examples) }}% of dataset).
+{% if score_summary %}
+{{ score_summary }}
+{% endif %}
+
+**Important:** These are only the failures. The prompt works correctly on the majority of cases. Recommend targeted improvements, not wholesale changes.
+{% endif %}
+
 ## Task
 Analyze the following evaluation results and identify:
-1. Common error patterns or failure modes
-2. Types of inputs where the model struggles
-3. Systematic issues in the model's responses
-4. Specific improvements that could address these issues
+1. **Common error patterns** - What types of failures occur repeatedly?
+2. **Score distribution issues** - Are scores systematically too high, too low, or inconsistent?
+3. **Input characteristics** - What distinguishes failing inputs from successful ones?
+4. **Root causes** - Why is the prompt producing these failures?
+5. **Specific recommendations** - What targeted changes would fix these issues without affecting successful cases?
+
+{% if stratify_column %}
+When comparing to the reference column ({{ stratify_column }}), quantify the bias:
+- Is the model over-scoring or under-scoring on average?
+- Which {{ stratify_column }} values have the largest errors?
+{% endif %}
+
+Focus on actionable, proportionate fixes. Avoid recommending extensive restructuring for isolated issues.
 
 ## Evaluation Results
 {% for row in rows %}
 ### Example {{ loop.index }}
 **Input:**
 {% for key, value in row.items() %}
-{% if key not in ['response', 'error'] and not key.endswith('_reason') %}
-- {{ key }}: {{ value | truncate(200) }}
+{% if key not in ['response', 'error', '_example_id'] and not key.endswith('_reason') %}
+- {{ key }}: {{ value | string | truncate(600) }}
 {% endif %}
 {% endfor %}
 
 **LLM Response:**
-{{ row.response | default("No response") | truncate(500) }}
+{{ row.response | default("No response") | truncate(1200) }}
 
 **Scores:**
 {% for key, value in row.items() %}
-{% if not key.endswith('_reason') and key not in ['response'] and value is number %}
-- {{ key }}: {{ value }}{% if row[key ~ '_reason'] is defined %} - {{ row[key ~ '_reason'] | truncate(100) }}{% endif %}
+{% if not key.endswith('_reason') and key not in ['response', '_example_id'] and value is number %}
+- {{ key }}: {{ value }}{% if row[key ~ '_reason'] is defined %} - {{ row[key ~ '_reason'] | truncate(300) }}{% endif %}
 {% endif %}
 {% endfor %}
 

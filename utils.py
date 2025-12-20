@@ -467,6 +467,26 @@ def load_prompt_file(file_path: str) -> str:
         return f.read()
 
 
+def load_template_with_fallback(project_path: str, template_name: str) -> tuple[str, str]:
+    """
+    Load a template file, checking project directory first then falling back to default.
+
+    Args:
+        project_path: Path to project directory
+        template_name: Template filename (e.g., "error-analysis-prompt.jinja2")
+
+    Returns:
+        Tuple of (template_content, path_used)
+
+    Example:
+        >>> template, path = load_template_with_fallback("./projects/my-project", "grader.jinja2")
+    """
+    project_template = os.path.join(project_path, template_name)
+    if os.path.exists(project_template):
+        return load_prompt_file(project_template), project_template
+    return load_prompt_file(template_name), template_name
+
+
 def save_prompt_file(file_path: str, content: str) -> None:
     """Save a prompt to a text file."""
     with open(file_path, "w", encoding="utf-8") as f:

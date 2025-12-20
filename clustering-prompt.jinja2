@@ -9,11 +9,20 @@
     - score_column: str - Name of the score column being analyzed
     - max_clusters: int - Maximum number of clusters to generate (2-5)
 
+  Optional Variables:
+    - total_examples: int | None - Total number of examples in the dataset
+    - threshold: float | None - Score threshold used to filter failures
+    - stratify_column: str | None - Column name used for stratification/reference
+
   Output Format:
     Returns structured JSON via Pydantic ClusterResponse model with:
     - clusters: list of {label, description, example_ids}
 #}
 You are an expert at analyzing LLM evaluation failures to identify patterns.
+
+{% if total_examples is defined %}
+**Context:** Clustering {{ failures|length }} failures out of {{ total_examples }} total examples ({{ "%.0f"|format(100 * failures|length / total_examples) }}% failure rate){% if threshold is defined %} at threshold {{ threshold }}{% endif %}.
+{% endif %}
 
 ## Task
 Analyze these failure examples and group them into 2-{{ max_clusters }} clusters based on the type of failure or error pattern.
@@ -22,6 +31,9 @@ For each cluster, provide:
 1. A short label (3-5 words) describing the failure type
 2. A one-sentence description of the common pattern
 3. List of example IDs that belong to this cluster
+{% if stratify_column %}
+4. The direction of scoring error for this cluster (over-scoring, under-scoring, or inconsistent)
+{% endif %}
 
 ## Failure Examples
 
@@ -29,15 +41,19 @@ For each cluster, provide:
 ### Example ID: {{ ex._example_id }}
 {% for key, value in ex.items() %}
 {% if key not in ['response', '_example_id'] and not key.endswith('_reason') %}
-**{{ key }}**: {{ value | string | truncate(200) }}
+**{{ key }}**: {{ value | string | truncate(500) }}
 {% endif %}
 {% endfor %}
 
-**LLM Response**: {{ ex.response | default("No response") | truncate(400) }}
+**LLM Response**: {{ ex.response | default("No response") | truncate(1000) }}
 
 **Score**: {{ ex[score_column] | default("N/A") }}
+{% if stratify_column and ex[stratify_column] is defined %}
+**Expected ({{ stratify_column }})**: {{ ex[stratify_column] }}
+**Delta**: {{ (ex[score_column] - ex[stratify_column]) | round(2) if ex[score_column] and ex[stratify_column] else "N/A" }}
+{% endif %}
 {% if ex[score_column ~ '_reason'] is defined %}
-**Reason**: {{ ex[score_column ~ '_reason'] | truncate(150) }}
+**Reason**: {{ ex[score_column ~ '_reason'] | truncate(350) }}
 {% endif %}
 
 ---

@@ -13,23 +13,23 @@ from utils import EvalResponse, GraderResponse
 class TestStratify:
     """Tests for stratify function."""
 
-    def test_finds_category_column(self):
+    def test_returns_expected_score(self):
+        """stratify() returns 'expected_score' for this project's dataset."""
         df = MagicMock()
         df.columns = ["text", "category", "value"]
         result = config.stratify(df)
-        assert result == "category"
+        assert result == "expected_score"
 
-    def test_finds_label_column(self):
-        df = MagicMock()
-        df.columns = ["text", "label"]
-        result = config.stratify(df)
-        assert result == "label"
 
-    def test_returns_none_when_no_match(self):
+class TestPrimaryScore:
+    """Tests for primary_score function."""
+
+    def test_returns_accuracy(self):
+        """primary_score() returns 'accuracy' for this project's dataset."""
         df = MagicMock()
-        df.columns = ["text", "value", "other"]
-        result = config.stratify(df)
-        assert result is None
+        df.columns = ["accuracy", "relevance"]
+        result = config.primary_score(df)
+        assert result == "accuracy"
 
 
 class TestEval:

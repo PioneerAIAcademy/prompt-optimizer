@@ -8,10 +8,13 @@
     - target_prompt: str - Either "system" or "user" to indicate which prompt to optimize
     - system_prompt: str - The current system prompt
     - user_prompt_template: str - The current user prompt template with {column} placeholders
-    - examples: list[dict] - Selected evaluation examples with scores
+    - examples: list[dict] - Selected low-scoring evaluation examples
 
   Optional Variables:
     - analysis: str | None - Error analysis text summarizing common issues
+    - score_stats: dict | None - Per-score statistics (mean, n_total, n_low, threshold)
+    - scoring_pattern: str | None - Pre-computed scoring pattern analysis text
+    - high_scoring_examples: list[dict] | None - Examples where the prompt works well (for contrast)
 
   Output Format:
     The LLM should output the improved prompt between <optimized_prompt> tags.
@@ -49,14 +52,29 @@ The following analysis summarizes common issues found across the evaluation data
 {{ analysis }}
 {% endif %}
 
-## Selected Examples
+{% if score_stats %}
+## Dataset Statistics
+{% for score_name, stats in score_stats.items() %}
+- **{{ score_name }}**: Mean {{ "%.2f"|format(stats.mean) }} across {{ stats.n_total }} examples
+  - {{ stats.n_low }} examples ({{ "%.0f"|format(100 * stats.n_low / stats.n_total) }}%) scored below {{ stats.threshold }}
+{% endfor %}
+
+Most examples already work correctly. Focus on fixing failures without breaking successes.
+{% endif %}
+
+{% if scoring_pattern %}
+## Scoring Pattern Analysis
+{{ scoring_pattern }}
+{% endif %}
+
+## Low-Scoring Examples
 Below are examples from the evaluation. Each shows the input, the LLM's response, and the scores received.
 
 {% for example in examples %}
 ### Example {{ loop.index }}
 **Input Data:**
 {% for key, value in example.items() %}
-{% if key not in ['response', 'score', 'reasoning'] and not key.endswith('_reason') %}
+{% if key not in ['response', 'score', 'reasoning', '_example_id'] and not key.endswith('_reason') and example[key ~ '_reason'] is not defined %}
 - {{ key }}: {{ value }}
 {% endif %}
 {% endfor %}
@@ -66,23 +84,60 @@ Below are examples from the evaluation. Each shows the input, the LLM's response
 
 **Scores:**
 {% for key, value in example.items() %}
-{% if not key.endswith('_reason') and key not in ['response', 'score', 'reasoning'] %}
-{% if example[key ~ '_reason'] is defined %}
+{% if not key.endswith('_reason') and key not in ['response', 'score', 'reasoning', '_example_id'] and example[key ~ '_reason'] is defined %}
 - {{ key }}: {{ value }} ({{ example[key ~ '_reason'] }})
-{% endif %}
 {% endif %}
 {% endfor %}
 
 ---
 {% endfor %}
 
+{% if high_scoring_examples %}
+## High-Scoring Examples (What Works)
+These examples show what the current prompt does WELL. Your changes must preserve these behaviors.
+
+{% for example in high_scoring_examples %}
+### Success Example {{ loop.index }}
+**Input Data:**
+{% for key, value in example.items() %}
+{% if key not in ['response', 'score', 'reasoning', '_example_id'] and not key.endswith('_reason') and example[key ~ '_reason'] is not defined %}
+- {{ key }}: {{ value }}
+{% endif %}
+{% endfor %}
+
+**LLM Response:**
+{{ example.response | default("No response") }}
+
+**Scores:**
+{% for key, value in example.items() %}
+{% if not key.endswith('_reason') and key not in ['response', 'score', 'reasoning', '_example_id'] and example[key ~ '_reason'] is defined %}
+- {{ key }}: {{ value }} ({{ example[key ~ '_reason'] }})
+{% endif %}
+{% endfor %}
+
+---
+{% endfor %}
+{% endif %}
+
 ## Your Task
-Based on the examples above{% if analysis %} and the error analysis{% endif %}, create an improved version of the {{ "system prompt" if target_prompt == "system" else "user prompt template" }} that will:
-1. Address the specific failure patterns observed
-2. Provide clearer instructions where the model struggled
-3. Maintain the original intent and format requirements
+Based on the examples above{% if analysis %} and the error analysis{% endif %}, create an improved version of the {{ "system prompt" if target_prompt == "system" else "user prompt template" }}.
+
+**Guidelines:**
+1. **Fix observed failures** - Address the specific patterns causing low scores
+2. **Preserve successes** - {% if high_scoring_examples %}The high-scoring examples show what works. Do NOT change behaviors that produce correct outputs{% else %}Be cautious not to break cases that already work{% endif %}
+3. **Make targeted changes** - Prefer surgical fixes over wholesale rewrites
+4. **Maintain core intent** - The prompt should accomplish the same task, just more reliably
 {% if target_prompt == "user" %}
-4. Preserve all {column_name} placeholders exactly as they appear
+5. **Preserve placeholders** - Keep all {column_name} placeholders exactly as they appear
+{% endif %}
+
+**Anti-patterns to avoid:**
+- Adding extensive checklists that increase cognitive load
+- Over-specifying edge cases from only 1-2 examples
+- Making the prompt significantly longer with warnings/caveats
+- Changes that would penalize currently-successful cases
+{% if scoring_pattern %}
+- Adjustments that move scores in the wrong direction (see Scoring Pattern Analysis above)
 {% endif %}
 
 Output your improved prompt between <optimized_prompt> and </optimized_prompt> tags.

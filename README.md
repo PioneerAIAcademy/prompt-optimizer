@@ -419,7 +419,7 @@ def analyze(rows, analysis_prompt_template, model) -> str:
     return call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
 ```
 
-You can also override the analysis template by creating `projects/your-project/analysis-prompt.jinja2`.
+You can also override the analysis template by creating `projects/your-project/error-analysis-prompt.jinja2`.
 
 ### Change How Failures Are Clustered
 

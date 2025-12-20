@@ -4,6 +4,7 @@ Prompt Optimizer Streamlit App
 A human-in-the-loop tool for iteratively optimizing LLM prompts.
 """
 
+import difflib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -34,6 +35,7 @@ from utils import (
     load_project_metadata,
     load_prompt_file,
     load_run_metadata,
+    load_template_with_fallback,
     paired_bootstrap_test,
     sample_size_guidance,
     save_project_metadata,
@@ -91,10 +93,34 @@ def validate_name(name: str, name_type: str = "name") -> str | None:
     if not name:
         return f"Please enter a {name_type}"
     if not re.match(VALID_NAME_PATTERN, name):
-        return f"{name_type.capitalize()} must start with alphanumeric and contain only letters, numbers, hyphens, and underscores"
+        return (
+            f"{name_type.capitalize()} must start with alphanumeric and contain "
+            "only letters, numbers, hyphens, and underscores"
+        )
     if len(name) > 100:
         return f"{name_type.capitalize()} must be 100 characters or less"
     return None
+
+
+def display_examples_expander(
+    examples: list[dict], title: str = "View examples"
+) -> None:
+    """
+    Display a list of examples in an expander with consistent formatting.
+
+    Args:
+        examples: List of example dictionaries
+        title: Title for the expander (count will be appended)
+    """
+    with st.expander(f"{title} ({len(examples)})"):
+        for i, ex in enumerate(examples):
+            ex_id = ex.get("_example_id", i + 1)
+            st.markdown(f"**Example {ex_id}**")
+            for key, value in ex.items():
+                if key != "_example_id":
+                    st.text(f"{key}: {str(value)[:200]}")
+            if i < len(examples) - 1:
+                st.divider()
 
 
 def run_evaluation(
@@ -215,7 +241,7 @@ def create_project_tab():
         user_prompt_path = st.text_input(
             "User Prompt Template File",
             placeholder="./samples/user_prompt.txt",
-            help="Path to a text file with {column_name} placeholders for dataset columns",
+            help="Text file with {column_name} placeholders for dataset columns",
         )
 
         # Optional grader prompt
@@ -223,7 +249,7 @@ def create_project_tab():
         grader_prompt_path = st.text_input(
             "Grader Prompt File (Jinja2 template, optional)",
             placeholder="./samples/grader_prompt.txt",
-            help="Path to a Jinja2 template file, or leave empty to use heuristic scoring only",
+            help="Jinja2 template file, or leave empty for heuristic scoring only",
         )
 
         # Optimization target selection
@@ -232,8 +258,10 @@ def create_project_tab():
             "Which prompt should be optimized?",
             ["system", "user"],
             index=0,
-            format_func=lambda x: "System Prompt" if x == "system" else "User Prompt Template",
-            help="Select which prompt will be iteratively improved. The other remains constant across all runs.",
+            format_func=lambda x: (
+                "System Prompt" if x == "system" else "User Prompt Template"
+            ),
+            help="Which prompt to iteratively improve. The other stays constant.",
         )
 
         submitted = st.form_submit_button("Create Project")
@@ -268,7 +296,9 @@ def create_project_tab():
             # Read prompt contents from files
             system_prompt = load_prompt_file(system_prompt_path)
             user_prompt = load_prompt_file(user_prompt_path)
-            grader_prompt = load_prompt_file(grader_prompt_path) if grader_prompt_path else ""
+            grader_prompt = (
+                load_prompt_file(grader_prompt_path) if grader_prompt_path else ""
+            )
 
             # Create project
             project_path = get_project_path(project_name, PROJECTS_DIR)
@@ -298,7 +328,9 @@ def create_project_tab():
             placeholders = re.findall(r'\{(\w+)\}', user_prompt)
             missing_cols = [p for p in placeholders if p not in df.columns]
             if missing_cols:
-                st.error(f"User prompt references columns not in dataset: {missing_cols}")
+                st.error(
+                    f"User prompt references columns not in dataset: {missing_cols}"
+                )
                 return
             dataset_name = os.path.splitext(os.path.basename(dataset_path))[0]
 
@@ -353,8 +385,10 @@ def create_project_tab():
             baseline_path = get_run_path(project_name, "baseline", PROJECTS_DIR)
             ensure_dir(baseline_path)
 
-            save_prompt_file(os.path.join(baseline_path, "system_prompt.txt"), system_prompt)
-            save_prompt_file(os.path.join(baseline_path, "user_prompt.txt"), user_prompt)
+            sys_path = os.path.join(baseline_path, "system_prompt.txt")
+            usr_path = os.path.join(baseline_path, "user_prompt.txt")
+            save_prompt_file(sys_path, system_prompt)
+            save_prompt_file(usr_path, user_prompt)
 
             run_metadata = RunMetadata(
                 run_name="baseline",
@@ -366,7 +400,8 @@ def create_project_tab():
 
             st.success(f"Project '{project_name}' created successfully!")
             st.info(
-                f"Dataset split: {len(train_df)} train, {len(dev_df)} dev, {len(test_df)} test"
+                f"Dataset split: {len(train_df)} train, {len(dev_df)} dev, "
+                f"{len(test_df)} test"
             )
 
 
@@ -416,7 +451,9 @@ def eval_tab():
 
         # Load grader prompt if exists
         grader_path = os.path.join(project_path, "grader_prompt.txt")
-        grader_prompt = load_prompt_file(grader_path) if os.path.exists(grader_path) else None
+        grader_prompt = (
+            load_prompt_file(grader_path) if os.path.exists(grader_path) else None
+        )
 
         try:
             # Process each split
@@ -483,8 +520,27 @@ def optimize_tab():
     prompt_to_optimize = project_meta.prompt_to_optimize
 
     # Display optimization target
-    target_label = "System Prompt" if prompt_to_optimize == "system" else "User Prompt Template"
+    target_label = (
+        "System Prompt" if prompt_to_optimize == "system" else "User Prompt Template"
+    )
     st.info(f"**Optimization Target:** {target_label}")
+
+    # Show template sources
+    template_names = [
+        "prompt-optimizer-prompt.jinja2",
+        "error-analysis-prompt.jinja2",
+        "clustering-prompt.jinja2",
+    ]
+    template_sources = {}
+    for tname in template_names:
+        _, tpath = load_template_with_fallback(project_path, tname)
+        template_sources[tname] = tpath
+
+    with st.expander("Template sources"):
+        for tname, tpath in template_sources.items():
+            # Show just the filename for display, with path as help
+            display_name = tname.replace("-prompt.jinja2", "").replace("-", " ").title()
+            st.caption(f"**{display_name}:** `{tpath}`")
 
     # Build runs table data with confidence intervals
     runs = list_runs(project_path)
@@ -522,7 +578,8 @@ def optimize_tab():
                                 if error_count > 0:
                                     formatted += f" ({error_count} err)"
                                 row[f"{split}_{score_col}"] = formatted
-                                raw_row[f"{split}_{score_col}"] = sum(scores) / len(scores)
+                                avg = sum(scores) / len(scores)
+                                raw_row[f"{split}_{score_col}"] = avg
                             else:
                                 row[f"{split}_{score_col}"] = "N/A"
                                 raw_row[f"{split}_{score_col}"] = None
@@ -599,9 +656,10 @@ def optimize_tab():
                     col_max = max(values) if values else 1
                     # Add padding to range
                     padding = (col_max - col_min) * 0.1 if col_max > col_min else 0.1
+                    col_range = [max(0, col_min - padding), min(1, col_max + padding)]
                     dimensions.append(
                         dict(
-                            range=[max(0, col_min - padding), min(1, col_max + padding)],
+                            range=col_range,
                             label=col.replace("_", " ").title(),
                             values=values,
                         )
@@ -643,7 +701,9 @@ def optimize_tab():
 
                 st.plotly_chart(fig, width="stretch")
             else:
-                st.info("Need at least 2 runs with complete scores for comparison chart.")
+                st.info(
+                    "Need at least 2 runs with complete scores for comparison chart."
+                )
         else:
             st.info(f"No score data available for {viz_split} split.")
 
@@ -678,6 +738,24 @@ def optimize_tab():
         del st.session_state[selection_key]
         selected_run = None
 
+    # Clear all selection state when run changes (including first selection)
+    prev_run_key = f"prev_optimize_run_{project_name}"
+    prev_run = st.session_state.get(prev_run_key)
+    if selected_run != prev_run:
+        # Clear selection keys for ALL runs in this project to ensure clean slate
+        keys_to_clear = [k for k in st.session_state.keys() if any(
+            k.startswith(prefix) for prefix in [
+                f"perf_select_{project_name}_",
+                f"auto_select_{project_name}_",
+                f"calibration_{project_name}_",
+                f"clusters_{project_name}_",
+                f"analysis_{project_name}_",
+            ]
+        )]
+        for key in keys_to_clear:
+            del st.session_state[key]
+        st.session_state[prev_run_key] = selected_run
+
     if selected_run:
         run_path = get_run_path(project_name, selected_run, PROJECTS_DIR)
 
@@ -696,12 +774,33 @@ def optimize_tab():
         eval_train_path = os.path.join(run_path, "eval-train.csv")
         if not os.path.exists(eval_train_path):
             st.warning(
-                f"Run '{selected_run}' has not been evaluated yet. Go to the Eval tab first."
+                f"Run '{selected_run}' has not been evaluated yet. "
+                "Go to the Eval tab first."
             )
             return
 
         # Load eval data
         eval_df = pd.read_csv(eval_train_path)
+
+        # Primary score column selector
+        score_cols = extract_score_columns(eval_df)
+        if score_cols:
+            # Use config.primary_score() as default, fallback to first column
+            default_score = config.primary_score(eval_df)
+            if default_score in score_cols:
+                default_idx = score_cols.index(default_score)
+            else:
+                default_idx = 0
+
+            primary_score = st.selectbox(
+                "Primary score column",
+                score_cols,
+                index=default_idx,
+                key=f"primary_score_{project_name}",
+                help="Score column used for thresholds, filtering, and analysis",
+            )
+        else:
+            primary_score = None
 
         # Example Performance Diff View
         lineage = get_run_lineage(project_path, selected_run)
@@ -710,12 +809,7 @@ def optimize_tab():
             st.subheader("Example Performance Across Runs")
             st.caption("Select rows to add them to optimization examples")
 
-            # Get primary score column
-            score_cols = extract_score_columns(eval_df)
-
-            if score_cols and "_example_id" in eval_df.columns:
-                primary_score = score_cols[0]
-
+            if primary_score and "_example_id" in eval_df.columns:
                 # Load history
                 history_df = load_example_history(
                     project_path, lineage, "train", primary_score
@@ -729,13 +823,13 @@ def optimize_tab():
                     if regressions["broke"]:
                         st.warning(
                             f"{len(regressions['broke'])} examples that passed in "
-                            f"{lineage[0]} now fail. Consider including them in optimization."
+                            f"{lineage[0]} now fail. Consider including them."
                         )
 
                     if regressions["oscillating"]:
                         st.info(
-                            f"{len(regressions['oscillating'])} examples are oscillating "
-                            f"(improved then regressed or vice versa)."
+                            f"{len(regressions['oscillating'])} examples are "
+                            "oscillating (improved then regressed or vice versa)."
                         )
 
                     # Build display DataFrame
@@ -743,14 +837,18 @@ def optimize_tab():
 
                     # Add trend column
                     def compute_trend(row):
-                        scores = [row.get(run) for run in lineage if run in row and pd.notna(row.get(run))]
+                        scores = [
+                            row.get(run) for run in lineage
+                            if run in row and pd.notna(row.get(run))
+                        ]
                         return get_trend_label(scores, lineage)
 
                     display_df["Trend"] = display_df.apply(compute_trend, axis=1)
 
                     # Reorder columns
                     cols = ["_example_id"] + lineage + ["Trend"]
-                    display_df = display_df[[c for c in cols if c in display_df.columns]]
+                    cols = [c for c in cols if c in display_df.columns]
+                    display_df = display_df[cols]
 
                     # Round scores for display
                     for run in lineage:
@@ -759,7 +857,9 @@ def optimize_tab():
 
                     # Show table with selection capability
                     gb_perf = GridOptionsBuilder.from_dataframe(display_df)
-                    gb_perf.configure_selection(selection_mode="multiple", use_checkbox=True)
+                    gb_perf.configure_selection(
+                        selection_mode="multiple", use_checkbox=True
+                    )
                     gb_perf.configure_column("_example_id", pinned="left")
                     gb_perf.configure_column("Trend", pinned="right")
                     grid_options_perf = gb_perf.build()
@@ -774,15 +874,38 @@ def optimize_tab():
                     )
 
                     # Store selected examples from performance grid
+                    perf_select_key = f"perf_select_{project_name}_{selected_run}"
                     perf_selected = get_selected_row(perf_grid.selected_rows) or []
                     if perf_selected:
-                        perf_ids = [row["_example_id"] for row in perf_selected if "_example_id" in row]
+                        perf_ids = [
+                            row["_example_id"] for row in perf_selected
+                            if "_example_id" in row
+                        ]
                         if perf_ids:
-                            auto_select_key = f"auto_select_{project_name}_{selected_run}"
-                            existing_ids = set(st.session_state.get(auto_select_key, []))
-                            new_ids = list(existing_ids | set(perf_ids))
-                            st.session_state[auto_select_key] = new_ids
-                            st.success(f"Added {len(perf_ids)} examples to optimization selection")
+                            existing = st.session_state.get(perf_select_key, [])
+                            new_ids = list(set(existing) | set(perf_ids))
+                            st.session_state[perf_select_key] = new_ids
+                            st.success(
+                                f"Added {len(perf_ids)} examples to optimization"
+                            )
+
+                    # Show selected examples from performance tracking
+                    perf_selected_ids = st.session_state.get(perf_select_key, [])
+                    if perf_selected_ids and "_example_id" in eval_df.columns:
+                        mask = eval_df["_example_id"].isin(perf_selected_ids)
+                        perf_examples = eval_df[mask].to_dict("records")
+                        if perf_examples:
+                            ids_str = sorted(perf_selected_ids)
+                            st.info(
+                                f"{len(perf_examples)} examples selected for "
+                                f"optimization (IDs: {ids_str})"
+                            )
+                            display_examples_expander(
+                                perf_examples, "View selected examples"
+                            )
+                            if st.button("Clear selection", key="clear_perf_selection"):
+                                del st.session_state[perf_select_key]
+                                st.rerun()
             else:
                 if "_example_id" not in eval_df.columns:
                     st.info(
@@ -806,12 +929,17 @@ def optimize_tab():
                 for col in score_cols:
                     if col in compare_df.columns:
                         eval_df[f"{col}_compare"] = compare_df[col].round(2)
-                        eval_df[f"{col}_diff"] = (eval_df[col] - compare_df[col]).round(2)
+                        diff = (eval_df[col] - compare_df[col]).round(2)
+                        eval_df[f"{col}_diff"] = diff
 
                 # Show significance test results
                 st.subheader("Statistical Comparison")
                 for col in score_cols:
-                    if col in compare_df.columns and "_example_id" in eval_df.columns and "_example_id" in compare_df.columns:
+                    has_ids = (
+                        "_example_id" in eval_df.columns
+                        and "_example_id" in compare_df.columns
+                    )
+                    if col in compare_df.columns and has_ids:
                         # Align by _example_id for valid paired test
                         merged = eval_df[["_example_id", col]].merge(
                             compare_df[["_example_id", col]],
@@ -826,11 +954,12 @@ def optimize_tab():
                                 scores_compare,
                                 scores_selected
                             )
-                            sig_marker = "✓ significant" if result["significant"] else "ns"
+                            sig = "✓ significant" if result["significant"] else "ns"
+                            ci_lo = result['ci_lower']
+                            ci_hi = result['ci_upper']
                             st.write(
                                 f"**{col}**: {result['observed_diff']:+.2f} "
-                                f"(95% CI: [{result['ci_lower']:.2f}, {result['ci_upper']:.2f}]) "
-                                f"**{sig_marker}**"
+                                f"(95% CI: [{ci_lo:.2f}, {ci_hi:.2f}]) **{sig}**"
                             )
 
         # Train dataset table with AgGrid
@@ -839,22 +968,22 @@ def optimize_tab():
         # Analysis section
         st.subheader("Error Analysis (Optional)")
 
-        # Get score columns for filtering
-        score_cols = extract_score_columns(eval_df)
-        primary_score = score_cols[0] if score_cols else None
-
         col1, col2 = st.columns([1, 4])
         with col1:
-            threshold_label = f"{primary_score} threshold" if primary_score else "Score threshold"
+            if primary_score:
+                threshold_label = f"{primary_score} threshold"
+            else:
+                threshold_label = "Score threshold"
             score_threshold = st.number_input(
                 threshold_label,
                 min_value=0.0,
                 max_value=1.0,
                 value=0.7,
                 step=0.1,
-                help=f"Analyze rows with {primary_score or 'scores'} below this threshold",
+                help="Analyze rows with scores below this threshold",
             )
-            analyze_all = st.checkbox("Analyze all rows", value=False, key=f"analyze_all_{project_name}_{selected_run}")
+            chk_key = f"analyze_all_{project_name}_{selected_run}"
+            analyze_all = st.checkbox("Analyze all rows", value=False, key=chk_key)
 
         # Analysis key for session state
         analysis_key = f"analysis_{project_name}_{selected_run}"
@@ -873,20 +1002,27 @@ def optimize_tab():
                     st.warning("No rows match the filter criteria")
                 else:
                     # Load analysis prompt
-                    project_analysis_path = os.path.join(
-                        project_path, "error-analysis-prompt.jinja2"
+                    analysis_template, analysis_template_path = (
+                        load_template_with_fallback(
+                            project_path, "error-analysis-prompt.jinja2"
+                        )
                     )
-                    if os.path.exists(project_analysis_path):
-                        analysis_template = load_prompt_file(project_analysis_path)
-                    else:
-                        analysis_template = load_prompt_file("error-analysis-prompt.jinja2")
+                    st.caption(f"Using template: {analysis_template_path}")
 
                     with st.spinner(f"Analyzing {len(analysis_rows)} rows..."):
                         try:
+                            stratify_col = config.stratify(eval_df)
+                            score_summary = None
+                            if primary_score:
+                                mean = eval_df[primary_score].mean()
+                                score_summary = f"Mean {primary_score}: {mean:.2f}"
                             result = config.analyze(
                                 analysis_rows,
                                 analysis_template,
                                 project_meta.optimizer_model,
+                                total_examples=len(eval_df),
+                                score_summary=score_summary,
+                                stratify_column=stratify_col,
                             )
                             st.session_state[analysis_key] = result
                         except Exception as e:
@@ -922,35 +1058,39 @@ def optimize_tab():
         with cluster_col2:
             if st.button("Cluster Failures"):
                 # Filter rows for clustering
-                score_cols = extract_score_columns(eval_df)
-                if not score_cols:
+                if not primary_score:
                     st.error("No score columns found. Run evaluation first.")
                 else:
-                    primary_score = score_cols[0]
                     mask = eval_df[primary_score] < cluster_threshold
                     failure_rows = eval_df[mask].to_dict("records")
 
                     if not failure_rows:
                         st.warning("No rows below threshold to cluster")
                     elif "_example_id" not in eval_df.columns:
-                        st.error("Example IDs not found. Re-run evaluation to enable clustering.")
+                        st.error(
+                            "Example IDs not found. Re-run evaluation to enable "
+                            "clustering."
+                        )
                     else:
                         # Load clustering template
-                        project_clustering_path = os.path.join(
-                            project_path, "clustering-prompt.jinja2"
+                        clustering_template, clustering_template_path = (
+                            load_template_with_fallback(
+                                project_path, "clustering-prompt.jinja2"
+                            )
                         )
-                        if os.path.exists(project_clustering_path):
-                            clustering_template = load_prompt_file(project_clustering_path)
-                        else:
-                            clustering_template = load_prompt_file("clustering-prompt.jinja2")
+                        st.caption(f"Using template: {clustering_template_path}")
 
                         with st.spinner(f"Clustering {len(failure_rows)} failures..."):
                             try:
+                                stratify_col = config.stratify(eval_df)
                                 result = config.cluster_failures(
                                     failure_rows,
                                     clustering_template,
                                     primary_score,
-                                    project_meta.optimizer_model
+                                    project_meta.optimizer_model,
+                                    total_examples=len(eval_df),
+                                    threshold=cluster_threshold,
+                                    stratify_column=stratify_col,
                                 )
                                 st.session_state[cluster_key] = result
                             except Exception as e:
@@ -964,13 +1104,16 @@ def optimize_tab():
 
             for i, cluster in enumerate(cluster_result["clusters"]):
                 with st.container():
-                    st.markdown(f"**Cluster {i+1}: {cluster.get('label', 'Unnamed')}** "
-                               f"({len(cluster.get('example_ids', []))} examples)")
+                    label = cluster.get('label', 'Unnamed')
+                    n_examples = len(cluster.get('example_ids', []))
+                    st.markdown(f"**Cluster {i+1}: {label}** ({n_examples} examples)")
                     st.markdown(f"_{cluster.get('description', 'No description')}_")
-                    st.markdown(f"IDs: {', '.join(map(str, cluster.get('example_ids', [])))}")
+                    ids = ', '.join(map(str, cluster.get('example_ids', [])))
+                    st.markdown(f"IDs: {ids}")
                     st.divider()
 
             # Auto-select button
+            auto_select_key = f"auto_select_{project_name}_{selected_run}"
             if st.button("Auto-select diverse set"):
                 diverse_ids = []
                 for cluster in cluster_result["clusters"]:
@@ -978,25 +1121,108 @@ def optimize_tab():
                     if ids:
                         diverse_ids.append(ids[0])  # Take first from each cluster
                 # Store in session state for grid pre-selection
-                st.session_state[f"auto_select_{project_name}_{selected_run}"] = diverse_ids
+                st.session_state[auto_select_key] = diverse_ids
                 st.rerun()
+
+            # Show selected examples from clustering (under the button)
+            auto_selected_ids = st.session_state.get(auto_select_key, [])
+            if auto_selected_ids and "_example_id" in eval_df.columns:
+                mask = eval_df["_example_id"].isin(auto_selected_ids)
+                diverse_examples = eval_df[mask].to_dict("records")
+                ids_str = sorted(auto_selected_ids)
+                st.success(
+                    f"Auto-selected {len(diverse_examples)} examples (IDs: {ids_str})"
+                )
+                display_examples_expander(diverse_examples, "View diverse examples")
+                if st.button("Clear auto-selection", key="clear_auto_cluster"):
+                    del st.session_state[auto_select_key]
+                    st.rerun()
+
+        # High-scoring (calibration) examples section
+        st.subheader("Calibration Examples (Optional)")
+        st.caption("High-scoring examples help the optimizer understand what works.")
+
+        # Compute default based on stratify column
+        stratify_col = config.stratify(eval_df)
+        if stratify_col and stratify_col in eval_df.columns:
+            strata_count = eval_df[stratify_col].nunique()
+        else:
+            strata_count = 3  # fallback
+
+        calib_col1, calib_col2 = st.columns([1, 1])
+        with calib_col1:
+            n_calibration = st.number_input(
+                "Number of examples",
+                min_value=0,
+                max_value=max(strata_count, 10),
+                value=strata_count,
+                help=f"Default is {strata_count} (one per {stratify_col or 'stratum'})",
+                key=f"n_calib_{project_name}_{selected_run}",
+            )
+        with calib_col2:
+            high_threshold = st.number_input(
+                "Score threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.9,
+                step=0.1,
+                help="Select examples with score >= this threshold",
+                key=f"high_thresh_{project_name}_{selected_run}",
+            )
+
+        calib_key = f"calibration_{project_name}_{selected_run}"
+
+        if st.button("Auto-select high-scoring examples"):
+            if primary_score:
+                high_mask = eval_df[primary_score] >= high_threshold
+                high_df = eval_df[high_mask]
+
+                if len(high_df) > 0:
+                    n_samples = min(n_calibration, len(high_df))
+
+                    if stratify_col and stratify_col in high_df.columns:
+                        # Proportional sampling - weight by stratum frequency
+                        grouped = high_df.groupby(stratify_col)[stratify_col]
+                        weights = grouped.transform("count")
+                        high_scoring_examples = high_df.sample(
+                            n=n_samples, weights=weights, random_state=42
+                        ).to_dict("records")
+                    else:
+                        # No stratify column - random sample
+                        high_scoring_examples = high_df.sample(
+                            n=n_samples, random_state=42
+                        ).to_dict("records")
+
+                    st.session_state[calib_key] = high_scoring_examples
+                    st.rerun()
+                else:
+                    st.warning(f"No examples found with score >= {high_threshold}")
+            else:
+                st.error("No score columns found")
+
+        # Display selected calibration examples (under the button)
+        if calib_key in st.session_state:
+            calibration_examples = st.session_state[calib_key]
+            if calibration_examples:
+                # Extract example IDs
+                calib_ids = [
+                    ex.get("_example_id", i + 1)
+                    for i, ex in enumerate(calibration_examples)
+                ]
+                st.success(
+                    f"Selected {len(calibration_examples)} high-scoring examples "
+                    f"(IDs: {sorted(calib_ids)})"
+                )
+                display_examples_expander(
+                    calibration_examples, "View calibration examples"
+                )
+
+                if st.button("Clear calibration examples"):
+                    del st.session_state[calib_key]
+                    st.rerun()
 
         # Data grid for example selection
         st.subheader("Select Additional Examples for Optimization")
-
-        # Check for auto-selected rows from clustering
-        auto_select_key = f"auto_select_{project_name}_{selected_run}"
-        auto_selected_ids = st.session_state.get(auto_select_key, [])
-
-        if auto_selected_ids and "_example_id" in eval_df.columns:
-            # Get the auto-selected examples as dicts
-            auto_selected_examples = eval_df[eval_df["_example_id"].isin(auto_selected_ids)].to_dict("records")
-            st.success(f"Auto-selected {len(auto_selected_examples)} rows from clustering (IDs: {sorted(auto_selected_ids)}); select additional rows below")
-            if st.button("Clear auto-selection"):
-                del st.session_state[auto_select_key]
-                st.rerun()
-        else:
-            auto_selected_examples = []
 
         gb2 = GridOptionsBuilder.from_dataframe(eval_df)
         gb2.configure_selection(selection_mode="multiple", use_checkbox=True)
@@ -1007,11 +1233,16 @@ def optimize_tab():
             for col in eval_df.columns:
                 sample_val = str(eval_df[col].iloc[0])
                 if len(sample_val) > 50:
+                    cell_style = {
+                        "textOverflow": "ellipsis",
+                        "overflow": "hidden",
+                        "whiteSpace": "nowrap",
+                    }
                     gb2.configure_column(
                         col,
                         maxWidth=300,
                         tooltipField=col,
-                        cellStyle={"textOverflow": "ellipsis", "overflow": "hidden", "whiteSpace": "nowrap"},
+                        cellStyle=cell_style,
                     )
 
         grid_options2 = gb2.build()
@@ -1024,45 +1255,15 @@ def optimize_tab():
             height=400,
             allow_unsafe_jscode=True,
             width="stretch",
+            key=f"example_grid_{project_name}_{selected_run}",
         )
 
         manually_selected = get_selected_row(data_grid.selected_rows) or []
 
-        # Merge auto-selected and manually selected, avoiding duplicates
-        all_selected_ids = set(auto_selected_ids)
-        for ex in manually_selected:
-            ex_id = ex.get("_example_id")
-            if ex_id is not None:
-                all_selected_ids.add(ex_id)
-
-        # Build final selected examples list
-        if all_selected_ids and "_example_id" in eval_df.columns:
-            selected_examples = eval_df[eval_df["_example_id"].isin(all_selected_ids)].to_dict("records")
-        else:
-            selected_examples = manually_selected
-
-        # Update session state for coverage tracking
-        if selected_examples:
-            st.session_state["selected_example_ids"] = list(all_selected_ids)
-
-        # Show selection summary
-        if auto_selected_examples and manually_selected:
-            manual_ids = [ex.get("_example_id") for ex in manually_selected if ex.get("_example_id") is not None]
-            st.info(f"Total: {len(selected_examples)} examples ({len(auto_selected_ids)} auto-selected + {len(set(manual_ids) - set(auto_selected_ids))} manually selected)")
-        elif selected_examples:
-            st.info(f"{len(selected_examples)} examples selected")
-
-        # Row detail view for selected examples
-        if selected_examples:
-            with st.expander(f"View selected rows ({len(selected_examples)})"):
-                for i, example_dict in enumerate(selected_examples):
-                    example_id = example_dict.get("_example_id", i + 1)
-                    st.markdown(f"### Example {example_id}")
-                    for key, value in example_dict.items():
-                        st.markdown(f"**{key}:**")
-                        st.text(str(value))
-                    if i < len(selected_examples) - 1:
-                        st.divider()
+        # Show selection summary for manually selected examples only
+        if manually_selected:
+            st.info(f"{len(manually_selected)} additional examples selected")
+            display_examples_expander(manually_selected, "View additional examples")
 
         # Optimization
         st.subheader("Generate Optimized Prompt")
@@ -1074,8 +1275,32 @@ def optimize_tab():
         )
 
         if st.button("Optimize", type="primary"):
-            if not selected_examples:
-                st.error("Please select at least one example")
+            # Gather examples from all four sources
+            auto_select_key = f"auto_select_{project_name}_{selected_run}"
+            perf_select_key = f"perf_select_{project_name}_{selected_run}"
+            diverse_ids = st.session_state.get(auto_select_key, [])
+            perf_ids = st.session_state.get(perf_select_key, [])
+            calibration_examples = st.session_state.get(calib_key, [])
+
+            # Build combined examples list (avoiding duplicates)
+            all_example_ids = set(diverse_ids) | set(perf_ids)
+            for ex in manually_selected:
+                ex_id = ex.get("_example_id")
+                if ex_id is not None:
+                    all_example_ids.add(ex_id)
+
+            if all_example_ids and "_example_id" in eval_df.columns:
+                mask = eval_df["_example_id"].isin(all_example_ids)
+                low_scoring_examples = eval_df[mask].to_dict("records")
+            else:
+                low_scoring_examples = manually_selected
+
+            # Check that we have at least one example from any source
+            if not low_scoring_examples and not calibration_examples:
+                st.error(
+                    "Please select at least one example (performance tracking, "
+                    "clustering, calibration, or additional)"
+                )
                 return
 
             # Validate run name (prevents path traversal)
@@ -1092,17 +1317,89 @@ def optimize_tab():
 
             # Load current prompts
             try:
-                system_prompt = load_prompt_file(os.path.join(run_path, "system_prompt.txt"))
-                user_prompt = load_prompt_file(os.path.join(run_path, "user_prompt.txt"))
+                sys_path = os.path.join(run_path, "system_prompt.txt")
+                usr_path = os.path.join(run_path, "user_prompt.txt")
+                system_prompt = load_prompt_file(sys_path)
+                user_prompt = load_prompt_file(usr_path)
             except FileNotFoundError as e:
                 st.error(f"Missing prompt file: {e}")
                 return
 
             # Load optimizer prompt
-            optimizer_template = load_prompt_file("prompt-optimizer-prompt.jinja2")
+            optimizer_template, optimizer_template_path = load_template_with_fallback(
+                project_path, "prompt-optimizer-prompt.jinja2"
+            )
+            st.caption(f"Using template: {optimizer_template_path}")
 
-            # Use selected examples directly (already list of dicts)
-            examples = selected_examples
+            # Use low-scoring examples (diverse + manually selected)
+            examples = low_scoring_examples
+
+            # Compute additional data for optimization
+            stratify_col = config.stratify(eval_df)
+
+            # Get high-scoring examples from session state (user-selected via UI)
+            high_scoring_examples = st.session_state.get(calib_key, [])
+
+            # Compute score statistics
+            score_stats = {}
+            for score_col in score_cols:
+                scores = eval_df[score_col].dropna()
+                if len(scores) > 0:
+                    threshold = 0.7
+                    score_stats[score_col] = {
+                        "mean": float(scores.mean()),
+                        "std": float(scores.std()),
+                        "n_total": len(scores),
+                        "n_low": int((scores < threshold).sum()),
+                        "threshold": threshold,
+                    }
+
+            # Compute scoring pattern (using stratify column)
+            scoring_pattern = None
+            if stratify_col and primary_score and stratify_col in eval_df.columns:
+                valid = eval_df[[primary_score, stratify_col]].dropna()
+                if len(valid) > 0:
+                    avg_score = valid[primary_score].mean()
+
+                    # Check if stratify_col is numeric (for calibration analysis)
+                    if pd.api.types.is_numeric_dtype(eval_df[stratify_col]):
+                        avg_reference = valid[stratify_col].mean()
+                        bias = avg_score - avg_reference
+                        direction = "over-scoring" if bias > 0 else "under-scoring"
+
+                        # Per-level breakdown
+                        breakdown_lines = []
+                        for ref_val in sorted(valid[stratify_col].unique()):
+                            subset = valid[valid[stratify_col] == ref_val]
+                            avg_given = subset[primary_score].mean()
+                            line = (
+                                f"- {stratify_col}={ref_val}: "
+                                f"avg {primary_score}={avg_given:.2f}"
+                            )
+                            breakdown_lines.append(line)
+
+                        scoring_pattern = (
+                            f"The model is {direction} by {abs(bias):.2f} points "
+                            f"on average.\n"
+                            f"Average {primary_score}: {avg_score:.2f}, "
+                            f"Average {stratify_col}: {avg_reference:.2f}\n\n"
+                            f"Per-level breakdown:\n"
+                        ) + "\n".join(breakdown_lines)
+                    else:
+                        # Non-numeric stratify column - show distribution by group
+                        breakdown_lines = []
+                        for group_val in sorted(valid[stratify_col].unique()):
+                            subset = valid[valid[stratify_col] == group_val]
+                            avg = subset[primary_score].mean()
+                            line = (
+                                f"- {stratify_col}={group_val}: "
+                                f"avg {primary_score}={avg:.2f} (n={len(subset)})"
+                            )
+                            breakdown_lines.append(line)
+
+                        scoring_pattern = (
+                            f"Score distribution by {stratify_col}:\n"
+                        ) + "\n".join(breakdown_lines)
 
             with st.spinner("Generating optimized prompt..."):
                 try:
@@ -1114,29 +1411,29 @@ def optimize_tab():
                         analysis_text if analysis_text.strip() else None,
                         project_meta.optimizer_model,
                         target_prompt=prompt_to_optimize,
+                        high_scoring_examples=high_scoring_examples,
+                        score_stats=score_stats,
+                        scoring_pattern=scoring_pattern,
                     )
 
                     # Create new run
                     ensure_dir(target_path)
+                    sys_out = os.path.join(target_path, "system_prompt.txt")
+                    usr_out = os.path.join(target_path, "user_prompt.txt")
                     if prompt_to_optimize == "system":
                         # Optimizing system prompt - save new system, copy user
-                        save_prompt_file(
-                            os.path.join(target_path, "system_prompt.txt"), optimized_prompt
-                        )
-                        save_prompt_file(
-                            os.path.join(target_path, "user_prompt.txt"), user_prompt
-                        )
+                        save_prompt_file(sys_out, optimized_prompt)
+                        save_prompt_file(usr_out, user_prompt)
                     else:
                         # Optimizing user prompt - copy system, save new user
-                        save_prompt_file(
-                            os.path.join(target_path, "system_prompt.txt"), system_prompt
-                        )
-                        save_prompt_file(
-                            os.path.join(target_path, "user_prompt.txt"), optimized_prompt
-                        )
+                        save_prompt_file(sys_out, system_prompt)
+                        save_prompt_file(usr_out, optimized_prompt)
 
                     # Get indices of selected examples by _example_id
-                    selected_ids = {ex.get("_example_id") for ex in examples if ex.get("_example_id") is not None}
+                    selected_ids = {
+                        ex.get("_example_id") for ex in examples
+                        if ex.get("_example_id") is not None
+                    }
                     selected_indices = []
                     if selected_ids and "_example_id" in eval_df.columns:
                         for i, example_id in enumerate(eval_df["_example_id"]):
@@ -1169,11 +1466,34 @@ def optimize_tab():
                     )
                     save_run_metadata(target_path, run_meta)
 
-                    optimized_label = "system prompt" if prompt_to_optimize == "system" else "user prompt template"
-                    st.success(f"Created new run '{target_run_name}' with optimized {optimized_label}!")
+                    if prompt_to_optimize == "system":
+                        optimized_label = "system prompt"
+                    else:
+                        optimized_label = "user prompt template"
+                    st.success(
+                        f"Created new run '{target_run_name}' with optimized "
+                        f"{optimized_label}!"
+                    )
 
                     with st.expander(f"View Optimized {target_label}"):
                         st.code(optimized_prompt)
+
+                    # Show diff between original and optimized
+                    original_prompt = (
+                        system_prompt
+                        if prompt_to_optimize == "system"
+                        else user_prompt
+                    )
+                    diff_lines = difflib.unified_diff(
+                        original_prompt.splitlines(keepends=True),
+                        optimized_prompt.splitlines(keepends=True),
+                        fromfile="Original",
+                        tofile="Optimized",
+                    )
+                    diff_text = "".join(diff_lines)
+                    if diff_text:
+                        with st.expander("View Diff"):
+                            st.code(diff_text, language="diff")
 
                 except Exception as e:
                     st.error(f"Optimization failed: {e}")

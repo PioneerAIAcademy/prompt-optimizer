@@ -75,26 +75,34 @@ def stratify(df) -> str | None:
     """
     Return the column name to use for stratification, or None for random split.
 
-    Modify this to stratify on a column relevant to your dataset.
-    For example, stratify on 'category', 'difficulty', or 'label'.
+    Customize this for your dataset. The stratification column is also used
+    as the ground truth reference for scoring pattern analysis.
 
     Args:
         df: The dataset DataFrame
 
     Returns:
         Column name to stratify on, or None for random split
-
-    Example - stratify on a 'difficulty' column:
-        >>> def stratify(df):
-        ...     if 'difficulty' in df.columns:
-        ...         return 'difficulty'
-        ...     return None
     """
-    # Default: look for common stratification columns
-    for col in ["category", "label", "difficulty", "score", "rating", "expected_score"]:
-        if col in df.columns:
-            return col
-    return None
+    return "expected_score"
+
+
+def primary_score(df) -> str | None:
+    """
+    Return the primary score column for optimization thresholds and filtering.
+
+    Customize this for your dataset. This column is used for:
+    - Filtering low-scoring examples for analysis
+    - Selecting high-scoring calibration examples
+    - Computing score statistics and patterns
+
+    Args:
+        df: The evaluation DataFrame
+
+    Returns:
+        Score column name, or None if no scores
+    """
+    return "accuracy"
 
 
 def eval(
@@ -277,6 +285,9 @@ def optimize(
     analysis: str | None,
     model: str,
     target_prompt: str = "system",
+    high_scoring_examples: list[dict] | None = None,
+    score_stats: dict | None = None,
+    scoring_pattern: str | None = None,
 ) -> str:
     """
     Generate an optimized prompt based on examples and analysis.
@@ -285,10 +296,13 @@ def optimize(
         optimizer_prompt_template: Jinja2 template for the optimizer
         system_prompt: Current system prompt
         user_prompt_template: Current user prompt template
-        examples: List of row dictionaries (selected examples with scores)
+        examples: List of row dictionaries (selected low-scoring examples)
         analysis: Optional error analysis text
         model: LiteLLM model string for optimization
         target_prompt: Which prompt to optimize ("system" or "user")
+        high_scoring_examples: Optional list of high-scoring examples for contrast
+        score_stats: Optional dict with per-score statistics (mean, n_total, n_low, threshold)
+        scoring_pattern: Optional pre-computed scoring pattern analysis text
 
     Returns:
         Optimized prompt string (system or user prompt depending on target_prompt)
@@ -302,6 +316,9 @@ def optimize(
             examples=examples,
             analysis=analysis,
             target_prompt=target_prompt,
+            high_scoring_examples=high_scoring_examples,
+            score_stats=score_stats,
+            scoring_pattern=scoring_pattern,
         )
     except Exception as e:
         raise EvaluationError(f"Failed to render optimizer template: {e}")
@@ -347,6 +364,9 @@ def analyze(
     rows: list[dict],
     analysis_prompt_template: str,
     model: str,
+    total_examples: int | None = None,
+    score_summary: str | None = None,
+    stratify_column: str | None = None,
 ) -> str:
     """
     Analyze rows to identify common error patterns.
@@ -355,6 +375,9 @@ def analyze(
         rows: List of row dictionaries from eval data
         analysis_prompt_template: Jinja2 template for analysis
         model: LiteLLM model string
+        total_examples: Optional total number of examples in the dataset
+        score_summary: Optional pre-computed score summary text
+        stratify_column: Optional column name used for stratification/reference
 
     Returns:
         Analysis text describing common error patterns
@@ -367,7 +390,13 @@ def analyze(
 
     # Render the analysis prompt with the rows
     try:
-        formatted_prompt = render_jinja_template(analysis_prompt_template, rows=rows)
+        formatted_prompt = render_jinja_template(
+            analysis_prompt_template,
+            rows=rows,
+            total_examples=total_examples,
+            score_summary=score_summary,
+            stratify_column=stratify_column,
+        )
     except Exception as e:
         raise EvaluationError(f"Failed to render analysis template: {e}")
 
@@ -387,7 +416,10 @@ def cluster_failures(
     clustering_prompt_template: str,
     score_column: str,
     model: str,
-    max_clusters: int = 5
+    max_clusters: int = 5,
+    total_examples: int | None = None,
+    threshold: float | None = None,
+    stratify_column: str | None = None,
 ) -> dict:
     """
     Cluster failure examples by pattern using LLM with structured output.
@@ -398,6 +430,9 @@ def cluster_failures(
         score_column: Name of the score column being analyzed
         model: LiteLLM model string
         max_clusters: Maximum number of clusters to request
+        total_examples: Optional total number of examples in the dataset
+        threshold: Optional score threshold used to filter failures
+        stratify_column: Optional column name used for stratification/reference
 
     Returns:
         Dict with key:
@@ -415,7 +450,10 @@ def cluster_failures(
             clustering_prompt_template,
             failures=rows,
             score_column=score_column,
-            max_clusters=max_clusters
+            max_clusters=max_clusters,
+            total_examples=total_examples,
+            threshold=threshold,
+            stratify_column=stratify_column,
         )
     except Exception as e:
         raise EvaluationError(f"Failed to render clustering template: {e}")
