@@ -435,11 +435,20 @@ def load_run_metadata(run_path: str) -> RunMetadata:
     """
     Load run metadata.json as Pydantic model.
 
+    If metadata.json doesn't exist, creates a default one with run_name
+    inferred from the directory name and created_at set to now.
+
     Raises:
-        FileNotFoundError: If metadata file doesn't exist
         ValidationError: If metadata is invalid
     """
     metadata_path = os.path.join(run_path, "metadata.json")
+    if not os.path.exists(metadata_path):
+        # Create default metadata
+        run_name = os.path.basename(run_path)
+        metadata = RunMetadata(run_name=run_name, created_at=datetime.now())
+        save_run_metadata(run_path, metadata)
+        return metadata
+
     with open(metadata_path, encoding="utf-8") as f:
         data = json.load(f)
     return RunMetadata.model_validate(data)

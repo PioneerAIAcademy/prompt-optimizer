@@ -35,7 +35,7 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 
 ### Core Files
 
-- **app.py** - Streamlit UI with three tabs: Create Project, Evaluate, Optimize
+- **app.py** - Streamlit UI with four tabs: Create Project, Evaluate, Optimize, Compare
 - **config.py** - User-customizable functions that control the evaluation pipeline. Contains 7 functions: `stratify()`, `primary_score()`, `eval()`, `score()`, `optimize()`, `analyze()`, `cluster_failures()`
 - **utils.py** - Reusable utilities for LLM calls, templates, dataset splitting, file I/O, statistical functions, and example tracking
 - **clustering-prompt.jinja2** - Default template for LLM-based failure clustering

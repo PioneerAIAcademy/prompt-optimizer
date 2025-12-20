@@ -235,6 +235,18 @@ Analyze results and generate improvements:
 | **Example selection** | Pick specific failures to learn from |
 | **Optimize** | Generate an improved prompt |
 
+### Tab 4: Compare
+
+Compare prompts between any two runs:
+
+| Feature | What it does |
+|---------|-------------|
+| **Run selection** | Choose two runs to compare (Run A as base, Run B as compare) |
+| **View mode** | Toggle between Diff view (unified diff format) and Side-by-side view |
+| **System prompt diff** | Shows changes in system prompt between runs |
+| **User prompt diff** | Shows changes in user prompt template between runs |
+| **Summary** | Indicates which prompts changed between the selected runs |
+
 ---
 
 ## How Scoring Works
@@ -478,6 +490,21 @@ projects/
         ├── eval-dev.csv       # Results on dev data
         └── eval-test.csv      # Results on test data
 ```
+
+### Creating Custom Runs
+
+You can create your own runs manually by simply creating a new directory with your prompt files:
+
+```
+projects/your-project/my-custom-run/
+├── system_prompt.txt    # Your system prompt
+└── user_prompt.txt      # Your user prompt template
+```
+
+That's it. The app will auto-generate `metadata.json` when the run is first loaded. This is useful when you want to:
+- Test a hand-crafted prompt variant
+- Import prompts from another source
+- A/B test specific prompt changes
 
 ---
 

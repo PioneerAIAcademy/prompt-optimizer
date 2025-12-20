@@ -507,6 +507,126 @@ def eval_tab():
             st.error("Please check your API keys and model configuration.")
 
 
+def compare_tab():
+    """Compare tab for viewing prompt diffs between runs."""
+    st.header("Compare Runs")
+
+    # Project selection
+    projects = list_projects(PROJECTS_DIR)
+    if not projects:
+        st.warning("No projects found. Create a project first.")
+        return
+
+    project_name = st.selectbox("Select Project", projects, key="compare_project")
+    project_path = get_project_path(project_name, PROJECTS_DIR)
+
+    # Run selection
+    runs = list_runs(project_path)
+    if len(runs) < 2:
+        st.info("Need at least 2 runs to compare. Create more runs first.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        run_a = st.selectbox("Run A (base)", runs, key="compare_run_a")
+    with col2:
+        # Default to a different run than A
+        default_idx = 1 if len(runs) > 1 and runs[0] == run_a else 0
+        run_b = st.selectbox("Run B (compare)", runs, index=default_idx, key="compare_run_b")
+
+    if run_a == run_b:
+        st.warning("Please select two different runs to compare.")
+        return
+
+    # Load prompts for both runs
+    run_a_path = get_run_path(project_name, run_a, PROJECTS_DIR)
+    run_b_path = get_run_path(project_name, run_b, PROJECTS_DIR)
+
+    try:
+        sys_a = load_prompt_file(os.path.join(run_a_path, "system_prompt.txt"))
+        usr_a = load_prompt_file(os.path.join(run_a_path, "user_prompt.txt"))
+        sys_b = load_prompt_file(os.path.join(run_b_path, "system_prompt.txt"))
+        usr_b = load_prompt_file(os.path.join(run_b_path, "user_prompt.txt"))
+    except FileNotFoundError as e:
+        st.error(f"Missing prompt file: {e.filename}")
+        return
+
+    # Display mode toggle
+    view_mode = st.radio(
+        "View mode",
+        ["Diff", "Side-by-side"],
+        horizontal=True,
+        key="compare_view_mode",
+    )
+
+    # System prompt comparison
+    st.subheader("System Prompt")
+    sys_changed = sys_a != sys_b
+
+    if not sys_changed:
+        st.info("System prompts are identical.")
+        with st.expander("View system prompt"):
+            st.code(sys_a)
+    else:
+        if view_mode == "Diff":
+            diff_lines = difflib.unified_diff(
+                sys_a.splitlines(keepends=True),
+                sys_b.splitlines(keepends=True),
+                fromfile=run_a,
+                tofile=run_b,
+            )
+            diff_text = "".join(diff_lines)
+            st.code(diff_text, language="diff")
+        else:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.caption(f"**{run_a}**")
+                st.code(sys_a)
+            with col_b:
+                st.caption(f"**{run_b}**")
+                st.code(sys_b)
+
+    # User prompt comparison
+    st.subheader("User Prompt Template")
+    usr_changed = usr_a != usr_b
+
+    if not usr_changed:
+        st.info("User prompts are identical.")
+        with st.expander("View user prompt"):
+            st.code(usr_a)
+    else:
+        if view_mode == "Diff":
+            diff_lines = difflib.unified_diff(
+                usr_a.splitlines(keepends=True),
+                usr_b.splitlines(keepends=True),
+                fromfile=run_a,
+                tofile=run_b,
+            )
+            diff_text = "".join(diff_lines)
+            st.code(diff_text, language="diff")
+        else:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.caption(f"**{run_a}**")
+                st.code(usr_a)
+            with col_b:
+                st.caption(f"**{run_b}**")
+                st.code(usr_b)
+
+    # Summary
+    st.divider()
+    changes = []
+    if sys_changed:
+        changes.append("system prompt")
+    if usr_changed:
+        changes.append("user prompt")
+
+    if changes:
+        st.success(f"Changes detected in: {', '.join(changes)}")
+    else:
+        st.info("No differences found between these runs.")
+
+
 def optimize_tab():
     """Optimize tab with run comparison and example selection."""
     st.header("Optimize")
@@ -1530,7 +1650,7 @@ def optimize_tab():
 
 
 # Main app
-tab1, tab2, tab3 = st.tabs(["Create Project", "Evaluate", "Optimize"])
+tab1, tab2, tab3, tab4 = st.tabs(["Create Project", "Evaluate", "Optimize", "Compare"])
 
 with tab1:
     create_project_tab()
@@ -1540,3 +1660,6 @@ with tab2:
 
 with tab3:
     optimize_tab()
+
+with tab4:
+    compare_tab()
