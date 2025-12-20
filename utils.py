@@ -269,7 +269,7 @@ def render_jinja_template(template_str: str, **kwargs: Any) -> str:
 def format_user_prompt(template: str, row: dict) -> str:
     """
     Format a user prompt template with values from a row.
-    Uses Python format strings (not Jinja2).
+    Uses regex substitution to safely handle values containing curly braces.
 
     Args:
         template: Format string with {column_name} placeholders
@@ -284,7 +284,16 @@ def format_user_prompt(template: str, row: dict) -> str:
         >>> format_user_prompt(template, row)
         'Question: What is AI?\\nAnswer: Artificial Intelligence'
     """
-    return template.format(**row)
+    import re
+
+    def replacer(match: re.Match) -> str:
+        key = match.group(1)
+        if key in row:
+            return str(row[key])
+        # Raise KeyError for missing keys (consistent with str.format behavior)
+        raise KeyError(key)
+
+    return re.sub(r"\{(\w+)\}", replacer, template)
 
 
 # =============================================================================
@@ -537,7 +546,8 @@ def extract_score_columns(df: pd.DataFrame) -> list[str]:
 def bootstrap_ci(
     scores: list[float],
     n_bootstrap: int = 1000,
-    ci: float = 0.95
+    ci: float = 0.95,
+    random_state: int | None = 42,
 ) -> tuple[float, float]:
     """
     Compute bootstrap confidence interval for the mean.
@@ -546,6 +556,7 @@ def bootstrap_ci(
         scores: List of score values
         n_bootstrap: Number of bootstrap samples
         ci: Confidence level (default 95%)
+        random_state: Random seed for reproducibility (default 42)
 
     Returns:
         Tuple of (lower_bound, upper_bound)
@@ -561,9 +572,10 @@ def bootstrap_ci(
     if len(scores) == 1:
         return (float(scores[0]), float(scores[0]))
 
+    rng = np.random.default_rng(random_state)
     means = []
     for _ in range(n_bootstrap):
-        sample = np.random.choice(scores, size=len(scores), replace=True)
+        sample = rng.choice(scores, size=len(scores), replace=True)
         means.append(np.mean(sample))
 
     alpha = (1 - ci) / 2
@@ -575,7 +587,8 @@ def bootstrap_ci(
 def paired_bootstrap_test(
     scores_a: list[float],
     scores_b: list[float],
-    n_bootstrap: int = 1000
+    n_bootstrap: int = 1000,
+    random_state: int | None = 42,
 ) -> dict:
     """
     Test if scores_b is significantly different from scores_a using paired bootstrap.
@@ -586,6 +599,7 @@ def paired_bootstrap_test(
         scores_a: Scores from run A (e.g., baseline)
         scores_b: Scores from run B (e.g., new version)
         n_bootstrap: Number of bootstrap samples
+        random_state: Random seed for reproducibility (default 42)
 
     Returns:
         Dict with keys:
@@ -617,9 +631,10 @@ def paired_bootstrap_test(
     diffs = scores_b - scores_a
     observed_diff = np.mean(diffs)
 
+    rng = np.random.default_rng(random_state)
     boot_diffs = []
     for _ in range(n_bootstrap):
-        sample_idx = np.random.choice(len(diffs), size=len(diffs), replace=True)
+        sample_idx = rng.choice(len(diffs), size=len(diffs), replace=True)
         boot_diffs.append(np.mean(diffs[sample_idx]))
 
     ci_lower = np.percentile(boot_diffs, 2.5)

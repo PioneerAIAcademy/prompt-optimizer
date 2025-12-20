@@ -61,6 +61,20 @@ class TestFormatUserPrompt:
         result = format_user_prompt(template, row)
         assert result == "Question: What is AI?"
 
+    def test_values_with_curly_braces(self):
+        """Values containing curly braces should not be interpreted as placeholders."""
+        template = "Response: {response}"
+        row = {"response": 'Return JSON like {"score": 5}'}
+        result = format_user_prompt(template, row)
+        assert result == 'Response: Return JSON like {"score": 5}'
+
+    def test_values_with_nested_braces(self):
+        """Values with nested JSON structures should work."""
+        template = "Data: {data}"
+        row = {"data": '{"outer": {"inner": 1}}'}
+        result = format_user_prompt(template, row)
+        assert result == 'Data: {"outer": {"inner": 1}}'
+
 
 class TestRenderJinjaTemplate:
     """Tests for render_jinja_template function."""

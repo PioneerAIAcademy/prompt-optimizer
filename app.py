@@ -155,7 +155,6 @@ def run_evaluation(
     """
     total = len(df)
     completed = 0
-    results = []
     lock = __import__("threading").Lock()
 
     def process_row(row_dict: dict) -> dict:
@@ -173,15 +172,19 @@ def run_evaluation(
     # Convert DataFrame rows to list of dicts
     rows = [row.to_dict() for _, row in df.iterrows()]
 
+    # Pre-allocate results to preserve original row order
+    results = [None] * total
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
+        # Submit all tasks, mapping future -> original index
         futures = {executor.submit(process_row, row): i for i, row in enumerate(rows)}
 
         for future in as_completed(futures):
             try:
                 result = future.result()
+                idx = futures[future]  # Get original row index
                 with lock:
-                    results.append(result)
+                    results[idx] = result  # Store at correct position
                     completed += 1
                     progress_bar.progress(completed / total)
                     status_text.text(f"Processing {completed}/{total} rows...")
@@ -924,13 +927,30 @@ def optimize_tab():
             if os.path.exists(compare_eval_path):
                 compare_df = pd.read_csv(compare_eval_path)
 
-                # Add comparison columns
+                # Add comparison columns (aligned by _example_id, not position)
                 score_cols = extract_score_columns(eval_df)
+                has_ids = (
+                    "_example_id" in eval_df.columns
+                    and "_example_id" in compare_df.columns
+                )
                 for col in score_cols:
                     if col in compare_df.columns:
-                        eval_df[f"{col}_compare"] = compare_df[col].round(2)
-                        diff = (eval_df[col] - compare_df[col]).round(2)
-                        eval_df[f"{col}_diff"] = diff
+                        if has_ids:
+                            # Merge on _example_id for correct alignment
+                            compare_map = dict(
+                                zip(compare_df["_example_id"], compare_df[col])
+                            )
+                            eval_df[f"{col}_compare"] = (
+                                eval_df["_example_id"].map(compare_map).round(2)
+                            )
+                            eval_df[f"{col}_diff"] = (
+                                eval_df[col] - eval_df[f"{col}_compare"]
+                            ).round(2)
+                        else:
+                            # Fall back to positional (legacy, less accurate)
+                            eval_df[f"{col}_compare"] = compare_df[col].round(2)
+                            diff = (eval_df[col] - compare_df[col]).round(2)
+                            eval_df[f"{col}_diff"] = diff
 
                 # Show significance test results
                 st.subheader("Statistical Comparison")
@@ -1181,12 +1201,22 @@ def optimize_tab():
                     n_samples = min(n_calibration, len(high_df))
 
                     if stratify_col and stratify_col in high_df.columns:
-                        # Proportional sampling - weight by stratum frequency
-                        grouped = high_df.groupby(stratify_col)[stratify_col]
-                        weights = grouped.transform("count")
-                        high_scoring_examples = high_df.sample(
-                            n=n_samples, weights=weights, random_state=42
-                        ).to_dict("records")
+                        # Filter out NaN values to avoid NaN weights from groupby
+                        valid_high_df = high_df.dropna(subset=[stratify_col])
+                        if len(valid_high_df) >= n_samples:
+                            # Proportional sampling - weight by stratum frequency
+                            grouped = valid_high_df.groupby(stratify_col)[
+                                stratify_col
+                            ]
+                            weights = grouped.transform("count")
+                            high_scoring_examples = valid_high_df.sample(
+                                n=n_samples, weights=weights, random_state=42
+                            ).to_dict("records")
+                        else:
+                            # Not enough valid rows, fall back to random sampling
+                            high_scoring_examples = high_df.sample(
+                                n=min(n_samples, len(high_df)), random_state=42
+                            ).to_dict("records")
                     else:
                         # No stratify column - random sample
                         high_scoring_examples = high_df.sample(
