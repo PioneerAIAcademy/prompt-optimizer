@@ -28,6 +28,10 @@ from utils import (
 EVAL_MODEL = "openai/gpt-4o-mini"
 EVAL_MODEL_PARAMS = {"temperature": 0.0}  # Deterministic for classification
 
+# Optimizer model params - used by optimize(), analyze(), cluster_failures()
+# Empty by default for reasoning models; modify if needed for your model
+OPTIMIZE_MODEL_PARAMS = {}
+
 # Valid emotion labels for classification
 VALID_EMOTIONS = {"joy", "anger", "sadness", "surprise"}
 
@@ -41,23 +45,6 @@ class EmotionResponse(BaseModel):
     """Response for emotion classification."""
 
     emotion: str = Field(..., description="One of: joy, anger, sadness, surprise")
-
-
-def get_model_params(model: str, temperature: float = 0.0) -> dict:
-    """
-    Return LLM parameters based on model type.
-
-    Used by optimize(), analyze(), and cluster_failures() which use the optimizer_model.
-
-    Args:
-        model: LiteLLM model string
-        temperature: Sampling temperature
-
-    Returns:
-        Dictionary of parameters to pass to litellm.completion()
-    """
-    return {"temperature": temperature}
-
 
 
 # =============================================================================
@@ -293,7 +280,7 @@ def optimize(
     # Call the optimizer LLM
     try:
         response = call_llm_single_prompt(
-            formatted_prompt, model, model_params=get_model_params(model, temperature=0.7)
+            formatted_prompt, model, model_params=OPTIMIZE_MODEL_PARAMS
         )
     except Exception as e:
         raise EvaluationError(f"Optimizer LLM call failed: {e}")
@@ -370,7 +357,7 @@ def analyze(
     # Call the LLM
     try:
         response = call_llm_single_prompt(
-            formatted_prompt, model, model_params=get_model_params(model, temperature=0.3)
+            formatted_prompt, model, model_params=OPTIMIZE_MODEL_PARAMS
         )
     except Exception as e:
         raise EvaluationError(f"Analysis LLM call failed: {e}")
@@ -431,7 +418,7 @@ def cluster_failures(
             prompt=formatted_prompt,
             model=model,
             response_model=ClusterResponse,
-            model_params=get_model_params(model, temperature=0.3),
+            model_params=OPTIMIZE_MODEL_PARAMS,
         )
     except Exception as e:
         raise EvaluationError(f"Clustering LLM call failed: {e}")
