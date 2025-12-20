@@ -42,12 +42,12 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 
 ### Sample Data
 
-The `samples/` directory contains a working example (BYU-Pathway chatbot answer evaluation):
-- `answer-evaluation.csv` - 153 examples with columns: `question`, `human_answer`, `ai_answer`, `retrieved_content`, `expected_score`
-- `system_prompt.txt` - Grading rubric (1-5 scale) for evaluating AI answers
-- `user_prompt.txt` - User prompt template with `{column}` placeholders
+The `samples/` directory contains a working example (emotion classification):
+- `sampled_emotions.csv` - 301 examples with columns: `text`, `emotion` (joy, anger, sadness, surprise)
+- `system_prompt.txt` - Emotion classifier prompt that outputs one of 4 emotion labels
+- `user_prompt.txt` - Simple template with `{text}` placeholder
 
-This sample data is the same example used in the companion `opik-demo` repository, allowing students to compare different optimization approaches.
+This sample demonstrates a straightforward classification task with exact-match scoring.
 
 ### Data Flow
 
@@ -70,13 +70,17 @@ Projects are stored in `./projects/{project-name}/`:
 
 The main customization point is `config.py`. Modify these functions to adapt to different use cases:
 
+- `EVAL_MODEL` - Hardcoded model for evaluation (e.g., `"openai/gpt-4o-mini"`)
+- `EVAL_MODEL_PARAMS` - Parameters for eval model (e.g., `{"temperature": 0.0}`)
 - `stratify(df)` - Returns column name for dataset stratification
 - `primary_score(df)` - Returns the column name of the primary score to use for optimization (filtering failures, clustering, etc.)
-- `eval(row, system_prompt, user_prompt_template, model)` - Calls LLM and extracts outputs. Must return dict with `response` key
-- `score(row, grader_prompt, model)` - Computes scores. Returns dict with paired keys (e.g., `accuracy` + `accuracy_reason`)
+- `eval(row, system_prompt, user_prompt_template)` - Calls LLM and extracts outputs. Must return dict with `response` key. Includes retry logic for invalid responses.
+- `score(row, grader_prompt)` - Computes scores. Returns dict with paired keys (e.g., `accuracy` + `accuracy_reason`)
 - `optimize(..., target_prompt)` - Generates improved prompt (system or user based on `target_prompt`). Extracts result from `<optimized_prompt>` tags
 - `analyze(rows, template, model)` - Identifies error patterns
 - `cluster_failures(rows, template, score_column, model, max_clusters)` - Groups low-scoring examples by failure pattern using LLM
+
+**Note:** The evaluation model is hardcoded in `config.py` (not configurable via UI) because it's specific to your task. The optimizer model is still configurable at project creation time.
 
 ### Template System
 
@@ -135,7 +139,7 @@ The `cluster_failures()` function groups low-scoring examples by failure pattern
 
 Project and run configuration use type-safe Pydantic models:
 
-- **ProjectMetadata** - Project settings: `project_name`, `dataset_name`, `split_ratio`, `eval_model`, `optimizer_model`, `stratify_column`, `prompt_to_optimize`, `created_at`, `dataset_source`, `system_prompt_source`, `user_prompt_source`, `grader_prompt_source`
+- **ProjectMetadata** - Project settings: `project_name`, `dataset_name`, `split_ratio`, `optimizer_model`, `stratify_column`, `prompt_to_optimize`, `created_at`, `dataset_source`, `system_prompt_source`, `user_prompt_source`, `grader_prompt_source`
 - **RunMetadata** - Run settings: `run_name`, `created_at`, `parent_run`, `eval_completed`, `scores`, `analysis_text`, `selected_examples`, `clustering_results`
 
 ### Parallel Evaluation

@@ -24,21 +24,6 @@ litellm.suppress_debug_info = True
 # =============================================================================
 
 
-class EvalResponse(BaseModel):
-    """Response from evaluation LLM call."""
-
-    response: str = Field(..., description="The main response text")
-    score: float | None = Field(None, description="Self-assessment score if requested")
-    reasoning: str | None = Field(None, description="Explanation for the score")
-
-
-class GraderResponse(BaseModel):
-    """Response from LLM-as-judge grading."""
-
-    relevance: float = Field(..., ge=0.0, le=1.0, description="Relevance score 0-1")
-    relevance_reason: str = Field(..., description="Explanation for relevance score")
-
-
 class Cluster(BaseModel):
     """A single failure cluster."""
 
@@ -66,7 +51,6 @@ class ProjectMetadata(BaseModel):
     project_name: str
     dataset_name: str
     split_ratio: str
-    eval_model: str
     optimizer_model: str
     stratify_column: str | None = None
     prompt_to_optimize: Literal["system", "user"] = "system"

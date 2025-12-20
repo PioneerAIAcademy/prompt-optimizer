@@ -10,8 +10,6 @@ import pytest
 from utils import (
     Cluster,
     ClusterResponse,
-    EvalResponse,
-    GraderResponse,
     ProjectMetadata,
     add_example_ids,
     bootstrap_ci,
@@ -220,7 +218,6 @@ class TestFileUtilities:
             project_name="test",
             dataset_name="test-dataset",
             split_ratio="40/40/20",
-            eval_model="openai/gpt-4o-mini",
             optimizer_model="anthropic/claude-sonnet-4-20250514",
             created_at=datetime(2024, 1, 1, 0, 0, 0),
         )
@@ -393,39 +390,6 @@ class TestExampleTracking:
 
 class TestPydanticModels:
     """Tests for Pydantic models used in structured outputs."""
-
-    def test_eval_response_with_all_fields(self):
-        response = EvalResponse(
-            response="This is the response text.",
-            score=4.5,
-            reasoning="Good answer.",
-        )
-        assert response.response == "This is the response text."
-        assert response.score == 4.5
-        assert response.reasoning == "Good answer."
-
-    def test_eval_response_optional_fields(self):
-        response = EvalResponse(
-            response="Just a response.",
-            score=None,
-            reasoning=None,
-        )
-        assert response.response == "Just a response."
-        assert response.score is None
-        assert response.reasoning is None
-
-    def test_grader_response(self):
-        response = GraderResponse(
-            relevance=0.85,
-            relevance_reason="Well-structured answer.",
-        )
-        assert response.relevance == 0.85
-        assert response.relevance_reason == "Well-structured answer."
-
-    def test_grader_response_bounds(self):
-        # Test that relevance is bounded 0-1
-        with pytest.raises(Exception):  # ValidationError
-            GraderResponse(relevance=1.5, relevance_reason="Too high")
 
     def test_cluster_model(self):
         cluster = Cluster(

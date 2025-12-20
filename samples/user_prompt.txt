@@ -1,9 +1,1 @@
-**EVALUATION CONTEXT:**
-
-**Question:** {question}
-
-**Ideal Human Answer:** {human_answer}
-
-**AI-Generated Answer:** {ai_answer}
-
-**Retrieved Content (source material):** {retrieved_content}
+{text}

@@ -2,18 +2,18 @@
 User-customizable functions for the prompt optimizer.
 
 Modify these functions to adapt the optimizer to your specific use case.
-The default implementations work for a Q&A grading task.
+The default implementations work for an emotion classification task.
 """
 
 import logging
 import re
 import time
 
+from pydantic import BaseModel, Field
+
 from utils import (
     ClusterResponse,
-    EvalResponse,
     EvaluationError,
-    GraderResponse,
     call_llm_single_prompt,
     call_llm_structured,
     format_user_prompt,
@@ -21,54 +21,48 @@ from utils import (
 )
 
 # =============================================================================
-# MODEL PARAMETERS
+# MODEL CONFIGURATION
 # =============================================================================
 
-# Parameters for OpenAI Responses API (reasoning models like GPT-5)
-# Customize these or add new parameter sets for different model types
-RESPONSES_API_PARAMS = {
-    "reasoning_effort": "low",
-    "verbosity": "low",
-    "max_output_tokens": 65536,
-    "num_retries": 5,
-}
+# Evaluation model - hardcoded for this sample task
+EVAL_MODEL = "openai/gpt-4o-mini"
+EVAL_MODEL_PARAMS = {"temperature": 0.0}  # Deterministic for classification
+
+# Valid emotion labels for classification
+VALID_EMOTIONS = {"joy", "anger", "sadness", "surprise"}
+
+
+# =============================================================================
+# PYDANTIC MODELS FOR STRUCTURED OUTPUTS
+# =============================================================================
+
+
+class EmotionResponse(BaseModel):
+    """Response for emotion classification."""
+
+    emotion: str = Field(..., description="One of: joy, anger, sadness, surprise")
 
 
 def get_model_params(model: str, temperature: float = 0.0) -> dict:
     """
     Return LLM parameters based on model type.
 
-    Customize this function to support different model providers.
-    Add new conditions for models that require special parameters.
+    Used by optimize(), analyze(), and cluster_failures() which use the optimizer_model.
 
     Args:
-        model: LiteLLM model string (e.g., "openai/gpt-4o-mini")
-        temperature: Sampling temperature (ignored for reasoning models)
+        model: LiteLLM model string
+        temperature: Sampling temperature
 
     Returns:
         Dictionary of parameters to pass to litellm.completion()
-
-    Example - add support for a custom model:
-        >>> def get_model_params(model, temperature=0.0):
-        ...     if "my-custom-model" in model:
-        ...         return {"custom_param": "value"}
-        ...     # ... rest of function
     """
-    # OpenAI Responses API (reasoning models like GPT-5)
-    if "/responses/" in model:
-        return RESPONSES_API_PARAMS.copy()
-
-    # Default: standard models with temperature
     return {"temperature": temperature}
+
 
 
 # =============================================================================
 # SCORE CONFIGURATION
 # =============================================================================
-
-# Score scale configuration (default 1-5 scale, range = 4)
-# Adjust these if your scoring system uses a different scale
-SCORE_SCALE_RANGE = 4.0  # max_score - min_score (e.g., 5 - 1 = 4)
 
 
 def stratify(df) -> str | None:
@@ -84,7 +78,7 @@ def stratify(df) -> str | None:
     Returns:
         Column name to stratify on, or None for random split
     """
-    return "expected_score"
+    return "emotion"
 
 
 def primary_score(df) -> str | None:
@@ -109,32 +103,29 @@ def eval(
     row: dict,
     system_prompt: str,
     user_prompt_template: str,
-    model: str,
 ) -> dict:
     """
     Evaluate a single row by calling the LLM with structured output.
 
     This function:
     1. Formats the user prompt with values from the row
-    2. Calls the LLM with structured output to get response, score, and reasoning
+    2. Calls the LLM with structured output to get the predicted emotion
+    3. Retries up to 3 times if the LLM returns an invalid emotion
 
     Args:
         row: Dictionary of column values from the dataset
         system_prompt: The system prompt
         user_prompt_template: User prompt template with {column} placeholders
-        model: LiteLLM model string
 
     Returns:
         Dictionary of outputs to add to the row:
-        - response: The main LLM response text
-        - score: Numeric score if the prompt asks for one (optional)
-        - reasoning: Explanation for the score (optional)
+        - response: The raw LLM response (emotion label)
+        - predicted_emotion: Normalized emotion label (lowercase)
 
     Example return:
         {
-            "response": "The answer is correct because...",
-            "score": 4.5,
-            "reasoning": "The response accurately..."
+            "response": "joy",
+            "predicted_emotion": "joy"
         }
     """
     # Format the user prompt with row values
@@ -143,27 +134,37 @@ def eval(
     except KeyError as e:
         raise EvaluationError(f"User prompt template references missing column: {e}")
 
-    # Call the LLM with structured output, retrying if score is missing
+    # Call the LLM with structured output, retrying if invalid emotion returned
     max_retries = 3
-    result = None
     last_error = None
+    predicted = None
 
     for attempt in range(max_retries):
         try:
             result = call_llm_structured(
                 prompt=user_prompt,
-                model=model,
-                response_model=EvalResponse,
+                model=EVAL_MODEL,
+                response_model=EmotionResponse,
                 system_prompt=system_prompt,
-                model_params=get_model_params(model),
+                model_params=EVAL_MODEL_PARAMS,
             )
-            # Success if we got a score
-            if result.score is not None:
-                break
-            # No score - log and retry
+
+            # Normalize: lowercase, strip whitespace
+            predicted = result.emotion.strip().lower()
+
+            # Check if emotion is valid
+            if predicted in VALID_EMOTIONS:
+                return {
+                    "response": result.emotion,
+                    "predicted_emotion": predicted,
+                }
+
+            # Invalid emotion - log and retry
             logging.warning(
-                f"Eval attempt {attempt + 1}/{max_retries}: no score returned, retrying..."
+                f"Eval attempt {attempt + 1}/{max_retries}: invalid emotion '{predicted}'. "
+                f"Expected one of {VALID_EMOTIONS}. Retrying..."
             )
+
         except Exception as e:
             last_error = e
             logging.warning(f"Eval attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -173,45 +174,34 @@ def eval(
             time.sleep(0.5 * (2**attempt))
 
     # If all retries failed with exceptions, raise error
-    if result is None:
-        raise EvaluationError(f"LLM call failed in eval after {max_retries} retries: {last_error}")
+    if last_error is not None and predicted is None:
+        raise EvaluationError(
+            f"LLM call failed in eval after {max_retries} retries: {last_error}"
+        )
 
-    # Build output dict from structured response
-    outputs = {
-        "response": result.response,
+    # Return the last result even if invalid (will score 0.0)
+    logging.warning(
+        f"Returning invalid emotion '{predicted}' after {max_retries} retries"
+    )
+    return {
+        "response": result.emotion,
+        "predicted_emotion": predicted,
     }
-
-    # If we still don't have a score after retries, mark as error
-    if result.score is None:
-        outputs["_eval_error"] = "No score returned after 3 retries"
-        logging.warning(f"Row failed to return score after {max_retries} retries")
-    else:
-        outputs["score"] = result.score
-
-    if result.reasoning is not None:
-        outputs["reasoning"] = result.reasoning
-
-    return outputs
 
 
 def score(
     row: dict,
     grader_prompt: str | None,
-    model: str,
 ) -> dict:
     """
     Score an evaluated row, returning scores with reasons.
 
-    This function can use:
-    - LLM-as-a-judge (using grader_prompt) with structured output
-    - Simple heuristics (comparing to expected output)
-    - External APIs
+    For emotion classification, this uses exact match comparison.
 
     Args:
         row: Dictionary containing original data plus eval outputs
-             (e.g., 'response', 'score')
-        grader_prompt: Optional Jinja2 template for LLM-as-judge grading
-        model: LiteLLM model string for grading
+             (e.g., 'predicted_emotion', 'emotion')
+        grader_prompt: Optional Jinja2 template for LLM-as-judge grading (not used for exact match)
 
     Returns:
         Dictionary of scores with paired reason keys.
@@ -219,61 +209,38 @@ def score(
 
     Example return:
         {
-            "accuracy": 0.85,
-            "accuracy_reason": "Score matches expected within 0.5 points",
-            "relevance": 0.90,
-            "relevance_reason": "Response addresses the question directly"
+            "accuracy": 1.0,
+            "accuracy_reason": "Predicted: joy, Expected: joy"
         }
     """
     scores = {}
 
-    # If we have an extracted score and expected score, compute accuracy
-    if "score" in row and "expected_score" in row:
-        extracted = row["score"]
-        expected = row["expected_score"]
+    # Exact match scoring for emotion classification
+    predicted = row.get("predicted_emotion", "").lower()
+    expected = row.get("emotion", "").lower()
 
-        # Validate types before arithmetic
-        try:
-            extracted = float(extracted)
-            expected = float(expected)
-        except (TypeError, ValueError) as e:
-            scores["accuracy"] = 0.0
-            scores["accuracy_reason"] = f"Type error in scores: {e}"
-        else:
-            # Calculate accuracy as 1 - normalized_difference
-            # Using configurable SCORE_SCALE_RANGE (default 4.0 for 1-5 scale)
-            diff = abs(extracted - expected)
-            accuracy = max(0.0, 1.0 - (diff / SCORE_SCALE_RANGE))
+    match = predicted == expected
+    scores["accuracy"] = 1.0 if match else 0.0
+    scores["accuracy_reason"] = f"Predicted: {predicted}, Expected: {expected}"
 
-            scores["accuracy"] = round(accuracy, 3)
-            scores["accuracy_reason"] = (
-                f"Extracted score: {extracted}, Expected: {expected}, Difference: {diff:.2f}"
-            )
+    # --- OPTIONAL: LLM-as-judge grading ---
+    # Uncomment and customize for additional quality scoring:
+    #
+    # if grader_prompt and "response" in row:
+    #     class GraderResponse(BaseModel):
+    #         relevance: float = Field(..., ge=0.0, le=1.0)
+    #         relevance_reason: str
+    #
+    #     formatted_grader = render_jinja_template(grader_prompt, row=row)
+    #     result = call_llm_structured(
+    #         prompt=formatted_grader,
+    #         model=EVAL_MODEL,
+    #         response_model=GraderResponse,
+    #         model_params=EVAL_MODEL_PARAMS,
+    #     )
+    #     scores["relevance"] = result.relevance
+    #     scores["relevance_reason"] = result.relevance_reason
 
-    # If we have a grader prompt, use LLM-as-judge with structured output
-    if grader_prompt and "response" in row:
-        try:
-            # Render the grader prompt with row data
-            formatted_grader = render_jinja_template(grader_prompt, row=row)
-
-            # Call the grading LLM with structured output
-            result = call_llm_structured(
-                prompt=formatted_grader,
-                model=model,
-                response_model=GraderResponse,
-                model_params=get_model_params(model),
-            )
-
-            # Clamp relevance to valid range
-            relevance = max(0.0, min(1.0, result.relevance))
-            scores["relevance"] = round(relevance, 3)
-            scores["relevance_reason"] = result.relevance_reason
-
-        except Exception as e:
-            raise EvaluationError(f"Grading LLM call failed: {e}")
-
-    # Return scores (may be empty if no scoring criteria matched)
-    # Rows with _eval_error from eval() are handled separately in aggregation
     return scores
 
 

@@ -63,35 +63,32 @@ Open http://localhost:8501 in your browser.
 
 ---
 
-## Sample Data: BYU-Pathway Answer Evaluation
+## Sample Data: Emotion Classification
 
 The `samples/` directory contains a complete working example you can use immediately:
 
 | File | Description |
 |------|-------------|
-| `answer-evaluation.csv` | 153 examples of AI chatbot answer evaluation |
-| `system_prompt.txt` | Detailed grading rubric (1-5 scale) |
-| `user_prompt.txt` | User prompt template with placeholders |
+| `sampled_emotions.csv` | 301 examples with columns: `text`, `emotion` (joy, anger, sadness, surprise) |
+| `system_prompt.txt` | Emotion classifier prompt that outputs one of 4 emotion labels |
+| `user_prompt.txt` | Simple template with `{text}` placeholder |
 
 ### Dataset Columns
 
 | Column | Description |
 |--------|-------------|
-| `question` | The question asked to the chatbot |
-| `human_answer` | The ideal human-written answer |
-| `ai_answer` | The AI-generated answer to evaluate |
-| `retrieved_content` | Source material the AI used (RAG context) |
-| `expected_score` | Human score (1-5) rating the AI answer quality |
+| `text` | The input text to classify |
+| `emotion` | The expected emotion label (joy, anger, sadness, or surprise) |
 
 ### Using the Sample Data
 
 1. Go to **Create Project** tab
-2. Enter `./samples/answer-evaluation.csv` as the Dataset File path
+2. Enter `./samples/sampled_emotions.csv` as the Dataset File path
 3. Enter `./samples/system_prompt.txt` as the System Prompt File path
 4. Enter `./samples/user_prompt.txt` as the User Prompt Template File path
 5. Create project and start evaluating
 
-This example evaluates how well an AI chatbot answers questions by comparing AI responses to ideal human answers. The grading rubric in the system prompt defines scores from 1 (contradictory) to 5 (semantically equivalent).
+This example demonstrates a straightforward classification task with exact-match scoring. The system prompt instructs the LLM to output exactly one of 4 emotion labels.
 
 ---
 

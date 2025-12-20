@@ -127,7 +127,6 @@ def run_evaluation(
     df: pd.DataFrame,
     system_prompt: str,
     user_prompt: str,
-    eval_model: str,
     grader_prompt: str | None,
     progress_bar,
     status_text,
@@ -144,7 +143,6 @@ def run_evaluation(
         df: DataFrame with rows to evaluate
         system_prompt: System prompt for evaluation
         user_prompt: User prompt template
-        eval_model: LiteLLM model string
         grader_prompt: Optional grader prompt template
         progress_bar: Streamlit progress bar widget
         status_text: Streamlit text widget for status updates
@@ -160,11 +158,11 @@ def run_evaluation(
     def process_row(row_dict: dict) -> dict:
         """Process a single row: eval then score."""
         # Call config.eval (this calls the LLM with retry)
-        eval_outputs = config.eval(row_dict, system_prompt, user_prompt, eval_model)
+        eval_outputs = config.eval(row_dict, system_prompt, user_prompt)
         row_dict.update(eval_outputs)
 
         # Call config.score
-        score_outputs = config.score(row_dict, grader_prompt, eval_model)
+        score_outputs = config.score(row_dict, grader_prompt)
         row_dict.update(score_outputs)
 
         return row_dict
@@ -208,7 +206,7 @@ def create_project_tab():
         # Dataset file path
         dataset_path = st.text_input(
             "Dataset File (CSV)",
-            placeholder="./samples/answer-evaluation.csv",
+            placeholder="./samples/sampled_emotions.csv",
             help="Path to a CSV file containing your dataset",
         )
 
@@ -220,19 +218,11 @@ def create_project_tab():
         )
 
         # Model configuration
-        col1, col2 = st.columns(2)
-        with col1:
-            eval_model = st.text_input(
-                "Evaluation Model",
-                value="openai/responses/gpt-5-mini",
-                help="LiteLLM model string for evaluation",
-            )
-        with col2:
-            optimizer_model = st.text_input(
-                "Optimizer Model",
-                value="anthropic/claude-opus-4-5-20251101",
-                help="LiteLLM model string for optimization",
-            )
+        optimizer_model = st.text_input(
+            "Optimizer Model",
+            value="anthropic/claude-opus-4-5-20251101",
+            help="LiteLLM model string for optimization",
+        )
 
         # Prompt file paths
         st.subheader("Baseline Prompts")
@@ -372,7 +362,6 @@ def create_project_tab():
                 project_name=project_name,
                 dataset_name=dataset_name,
                 split_ratio=split_ratio,
-                eval_model=eval_model,
                 optimizer_model=optimizer_model,
                 stratify_column=stratify_col,
                 prompt_to_optimize=prompt_to_optimize,
@@ -450,7 +439,6 @@ def eval_tab():
     # Evaluate button
     if st.button("Evaluate", type="primary"):
         dataset_name = project_meta.dataset_name
-        eval_model = project_meta.eval_model
 
         # Load grader prompt if exists
         grader_path = os.path.join(project_path, "grader_prompt.txt")
@@ -476,7 +464,6 @@ def eval_tab():
                     df,
                     system_prompt,
                     user_prompt,
-                    eval_model,
                     grader_prompt,
                     progress_bar,
                     status_text,
