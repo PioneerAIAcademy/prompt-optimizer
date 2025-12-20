@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 from sklearn.model_selection import train_test_split
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+# Suppress verbose LiteLLM logging (e.g., "Provider List" messages)
+litellm.suppress_debug_info = True
+
 
 # =============================================================================
 # PYDANTIC MODELS FOR STRUCTURED OUTPUTS
@@ -68,6 +71,10 @@ class ProjectMetadata(BaseModel):
     stratify_column: str | None = None
     prompt_to_optimize: Literal["system", "user"] = "system"
     created_at: datetime
+    dataset_source: str | None = None
+    system_prompt_source: str | None = None
+    user_prompt_source: str | None = None
+    grader_prompt_source: str | None = None
 
 
 class RunMetadata(BaseModel):
@@ -80,6 +87,7 @@ class RunMetadata(BaseModel):
     scores: dict[str, dict[str, float]] | None = None
     analysis_text: str | None = None
     selected_examples: list[int] | None = None
+    clustering_results: list[dict] | None = None  # List of cluster dicts with label, description, example_ids
 
 
 # =============================================================================
@@ -92,7 +100,7 @@ def call_llm(
     system_prompt: str,
     user_prompt: str,
     model: str,
-    temperature: float = 0.0,
+    model_params: dict | None = None,
 ) -> str:
     """
     Call an LLM using LiteLLM with retry logic.
@@ -101,7 +109,7 @@ def call_llm(
         system_prompt: System message content
         user_prompt: User message content
         model: LiteLLM model string (e.g., "openai/gpt-4o-mini")
-        temperature: Sampling temperature (default 0.0 for determinism)
+        model_params: LLM parameters (e.g., temperature, reasoning_effort)
 
     Returns:
         The assistant's response text
@@ -110,22 +118,29 @@ def call_llm(
         >>> response = call_llm(
         ...     system_prompt="You are a helpful assistant.",
         ...     user_prompt="What is 2+2?",
-        ...     model="openai/gpt-4o-mini"
+        ...     model="openai/gpt-4o-mini",
+        ...     model_params={"temperature": 0.0}
         ... )
     """
+    if model_params is None:
+        model_params = {}
     response = litellm.completion(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=temperature,
+        **model_params,
     )
     return response.choices[0].message.content
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def call_llm_single_prompt(prompt: str, model: str, temperature: float = 0.7) -> str:
+def call_llm_single_prompt(
+    prompt: str,
+    model: str,
+    model_params: dict | None = None,
+) -> str:
     """
     Call an LLM with a single prompt (no system/user split).
     Used for optimizer and analyzer prompts.
@@ -133,15 +148,17 @@ def call_llm_single_prompt(prompt: str, model: str, temperature: float = 0.7) ->
     Args:
         prompt: The full prompt text
         model: LiteLLM model string
-        temperature: Sampling temperature
+        model_params: LLM parameters (e.g., temperature, reasoning_effort)
 
     Returns:
         The assistant's response text
     """
+    if model_params is None:
+        model_params = {}
     response = litellm.completion(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
+        **model_params,
     )
     return response.choices[0].message.content
 
@@ -151,8 +168,8 @@ def call_llm_structured(
     prompt: str,
     model: str,
     response_model: type[BaseModel],
-    temperature: float = 0.0,
     system_prompt: str | None = None,
+    model_params: dict | None = None,
 ) -> BaseModel:
     """
     Call an LLM with structured output using response_format.
@@ -161,8 +178,8 @@ def call_llm_structured(
         prompt: The user prompt text
         model: LiteLLM model string
         response_model: Pydantic model class for the expected response
-        temperature: Sampling temperature (default 0.0 for determinism)
         system_prompt: Optional system message for context
+        model_params: LLM parameters (e.g., temperature, reasoning_effort)
 
     Returns:
         An instance of the response_model with the parsed response
@@ -171,7 +188,8 @@ def call_llm_structured(
         >>> result = call_llm_structured(
         ...     prompt="Evaluate this answer...",
         ...     model="openai/gpt-4o-mini",
-        ...     response_model=EvalResponse
+        ...     response_model=EvalResponse,
+        ...     model_params={"temperature": 0.0}
         ... )
         >>> print(result.score, result.reasoning)
     """
@@ -180,11 +198,13 @@ def call_llm_structured(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    if model_params is None:
+        model_params = {}
     response = litellm.completion(
         model=model,
         messages=messages,
-        temperature=temperature,
         response_format=response_model,
+        **model_params,
     )
     return response_model.model_validate_json(response.choices[0].message.content)
 
@@ -690,7 +710,7 @@ def get_run_lineage(project_path: str, run_name: str) -> list[str]:
         run_path = os.path.join(project_path, current)
         try:
             meta = load_run_metadata(run_path)
-            current = meta.get("parent_run")
+            current = meta.parent_run
         except (FileNotFoundError, json.JSONDecodeError):
             break
 

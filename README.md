@@ -86,9 +86,9 @@ The `samples/` directory contains a complete working example you can use immedia
 ### Using the Sample Data
 
 1. Go to **Create Project** tab
-2. Upload `samples/answer-evaluation.csv`
-3. Copy contents of `samples/system_prompt.txt` into the System Prompt field
-4. Copy contents of `samples/user_prompt.txt` into the User Prompt Template field
+2. Enter `./samples/answer-evaluation.csv` as the Dataset File path
+3. Enter `./samples/system_prompt.txt` as the System Prompt File path
+4. Enter `./samples/user_prompt.txt` as the User Prompt Template File path
 5. Create project and start evaluating
 
 This example evaluates how well an AI chatbot answers questions by comparing AI responses to ideal human answers. The grading rubric in the system prompt defines scores from 1 (contradictory) to 5 (semantically equivalent).
@@ -119,13 +119,13 @@ question,context,answer,expected_score
 
 1. Go to the **Create Project** tab
 2. Enter a project name: `grading-assistant`
-3. Upload your CSV file
+3. Enter the path to your CSV file (e.g., `./data/grading-examples.csv`)
 4. Set the **Evaluation Model** (the model that runs your prompt): `openai/responses/gpt-5-mini`
 5. Set the **Optimizer Model** (the model that improves your prompt): `anthropic/claude-opus-4-5-20251101`
 
-Now write your initial prompt:
+Now create your prompt files:
 
-**System Prompt:**
+**system_prompt.txt:**
 ```
 You are a grading assistant. Evaluate the student's answer on a scale of 1-5.
 
@@ -134,7 +134,7 @@ Format your response exactly as:
 Reasoning: [your explanation]
 ```
 
-**User Prompt Template:**
+**user_prompt.txt:**
 ```
 Question: {question}
 Context: {context}
@@ -143,7 +143,9 @@ Student Answer: {answer}
 Please evaluate this answer.
 ```
 
-Notice the `{question}`, `{context}`, and `{answer}` placeholders - these get filled in with values from each row of your CSV.
+6. Enter the paths to your prompt files in the form
+
+Notice the `{question}`, `{context}`, and `{answer}` placeholders in the user prompt - these get filled in with values from each row of your CSV.
 
 > **Note:** Only the User Prompt Template supports `{column}` placeholders. The System Prompt is static and passed to the LLM unchanged for every row.
 
@@ -173,8 +175,8 @@ You'll see a table with all your examples and their scores. Look for:
 ### Step 5: Analyze and Improve
 
 1. Click **Analyze** to have the AI identify common error patterns
-2. Select 3-5 examples that show different failure modes (use the checkboxes)
-3. Click **Cluster Failures** to group failures by type (optional but helpful)
+2. Click **Cluster Failures** to group failures by type
+3. Select 1-2 representative examples from each cluster (use the checkboxes)
 4. Enter a name for your new run: `v2`
 5. Click **Optimize**
 
@@ -205,12 +207,12 @@ This is where you set up a new optimization project:
 | Setting | What it does |
 |---------|-------------|
 | **Project Name** | Unique identifier for your project |
-| **Dataset** | Your CSV file with test examples |
+| **Dataset File** | Path to your CSV file with test examples |
 | **Split Ratio** | How to divide data (40% train / 40% dev / 20% test is default) |
 | **Evaluation Model** | The LLM that runs your prompt (use a fast/cheap model like `gpt-5-mini`) |
 | **Optimizer Model** | The LLM that generates improved prompts (use a smart model like `claude-opus-4-5`) |
-| **System Prompt** | Instructions for the LLM (static, no placeholders) |
-| **User Prompt Template** | Template with `{column}` placeholders for your data |
+| **System Prompt File** | Path to instructions for the LLM (static, no placeholders) |
+| **User Prompt Template File** | Path to template with `{column}` placeholders for your data |
 | **Optimization Target** | Which prompt to improve: System Prompt or User Prompt Template |
 
 ### Tab 2: Evaluate
@@ -304,10 +306,10 @@ Reasoning: [your explanation]
 
 When choosing failures to learn from:
 
-1. **Cover your failure clusters** - Aim for at least 1-2 representative examples per cluster. If clustering identifies 4 failure modes, select 4-8 examples, not a fixed number.
-2. **Use clustering first** - Run "Cluster Failures" to understand the failure landscape before selecting examples
+1. **Cluster first** - Always run "Cluster Failures" before selecting examples. This reveals the distinct failure patterns in your data.
+2. **1-2 examples per cluster** - Select 1-2 representative examples from each cluster. If clustering identifies 4 failure modes, select 4-8 examples total.
 3. **Pick clear failures** - Choose unambiguous failures over edge cases. The optimizer learns better from clear patterns.
-4. **Diversity over volume** - 5-8 well-chosen examples covering different clusters beat 15 random ones. The goal is coverage, not quantity.
+4. **Diversity over volume** - Examples covering different clusters teach more than many examples of the same failure. The goal is coverage, not quantity.
 
 ### Writing Good Initial Prompts
 
@@ -523,7 +525,7 @@ Scores need paired keys (`accuracy` + `accuracy_reason`). Check your `score()` f
 ### Slow Evaluation
 - Use a faster model like `gpt-5-mini` for evaluation
 - Reduce dataset size for initial testing
-- Evaluation runs 4 parallel threads by default, but API rate limits may still slow large datasets
+- Evaluation runs 8 parallel threads by default, but API rate limits may still slow large datasets
 
 ---
 

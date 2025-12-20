@@ -55,8 +55,9 @@ class TestEval:
         assert result["score"] == 4.5
         assert "reasoning" in result
 
+    @patch("config.time.sleep")  # Skip actual sleep during tests
     @patch("config.call_llm_structured")
-    def test_missing_score_in_response(self, mock_llm):
+    def test_missing_score_in_response(self, mock_llm, mock_sleep):
         mock_llm.return_value = EvalResponse(
             response="This response has no score.",
             score=None,
@@ -73,6 +74,10 @@ class TestEval:
 
         assert "response" in result
         assert "score" not in result
+        assert "_eval_error" in result
+        assert "3 retries" in result["_eval_error"]
+        # Should have retried 3 times
+        assert mock_llm.call_count == 3
 
 
 class TestScore:

@@ -5,7 +5,9 @@ Modify these functions to adapt the optimizer to your specific use case.
 The default implementations work for a Q&A grading task.
 """
 
+import logging
 import re
+import time
 
 from utils import (
     ClusterResponse,
@@ -17,6 +19,52 @@ from utils import (
     format_user_prompt,
     render_jinja_template,
 )
+
+# =============================================================================
+# MODEL PARAMETERS
+# =============================================================================
+
+# Parameters for OpenAI Responses API (reasoning models like GPT-5)
+# Customize these or add new parameter sets for different model types
+RESPONSES_API_PARAMS = {
+    "reasoning_effort": "low",
+    "verbosity": "low",
+    "max_output_tokens": 65536,
+    "num_retries": 5,
+}
+
+
+def get_model_params(model: str, temperature: float = 0.0) -> dict:
+    """
+    Return LLM parameters based on model type.
+
+    Customize this function to support different model providers.
+    Add new conditions for models that require special parameters.
+
+    Args:
+        model: LiteLLM model string (e.g., "openai/gpt-4o-mini")
+        temperature: Sampling temperature (ignored for reasoning models)
+
+    Returns:
+        Dictionary of parameters to pass to litellm.completion()
+
+    Example - add support for a custom model:
+        >>> def get_model_params(model, temperature=0.0):
+        ...     if "my-custom-model" in model:
+        ...         return {"custom_param": "value"}
+        ...     # ... rest of function
+    """
+    # OpenAI Responses API (reasoning models like GPT-5)
+    if "/responses/" in model:
+        return RESPONSES_API_PARAMS.copy()
+
+    # Default: standard models with temperature
+    return {"temperature": temperature}
+
+
+# =============================================================================
+# SCORE CONFIGURATION
+# =============================================================================
 
 # Score scale configuration (default 1-5 scale, range = 4)
 # Adjust these if your scoring system uses a different scale
@@ -87,23 +135,49 @@ def eval(
     except KeyError as e:
         raise EvaluationError(f"User prompt template references missing column: {e}")
 
-    # Call the LLM with structured output
-    try:
-        result = call_llm_structured(
-            prompt=user_prompt,
-            model=model,
-            response_model=EvalResponse,
-            system_prompt=system_prompt,
-        )
-    except Exception as e:
-        raise EvaluationError(f"LLM call failed in eval: {e}")
+    # Call the LLM with structured output, retrying if score is missing
+    max_retries = 3
+    result = None
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            result = call_llm_structured(
+                prompt=user_prompt,
+                model=model,
+                response_model=EvalResponse,
+                system_prompt=system_prompt,
+                model_params=get_model_params(model),
+            )
+            # Success if we got a score
+            if result.score is not None:
+                break
+            # No score - log and retry
+            logging.warning(
+                f"Eval attempt {attempt + 1}/{max_retries}: no score returned, retrying..."
+            )
+        except Exception as e:
+            last_error = e
+            logging.warning(f"Eval attempt {attempt + 1}/{max_retries} failed: {e}")
+
+        # Exponential backoff before retry (skip on last attempt)
+        if attempt < max_retries - 1:
+            time.sleep(0.5 * (2**attempt))
+
+    # If all retries failed with exceptions, raise error
+    if result is None:
+        raise EvaluationError(f"LLM call failed in eval after {max_retries} retries: {last_error}")
 
     # Build output dict from structured response
     outputs = {
         "response": result.response,
     }
 
-    if result.score is not None:
+    # If we still don't have a score after retries, mark as error
+    if result.score is None:
+        outputs["_eval_error"] = "No score returned after 3 retries"
+        logging.warning(f"Row failed to return score after {max_retries} retries")
+    else:
         outputs["score"] = result.score
 
     if result.reasoning is not None:
@@ -179,7 +253,7 @@ def score(
                 prompt=formatted_grader,
                 model=model,
                 response_model=GraderResponse,
-                temperature=0.0,
+                model_params=get_model_params(model),
             )
 
             # Clamp relevance to valid range
@@ -190,11 +264,8 @@ def score(
         except Exception as e:
             raise EvaluationError(f"Grading LLM call failed: {e}")
 
-    # Default score if nothing else computed
-    if not scores:
-        scores["quality"] = 0.5
-        scores["quality_reason"] = "No scoring criteria matched"
-
+    # Return scores (may be empty if no scoring criteria matched)
+    # Rows with _eval_error from eval() are handled separately in aggregation
     return scores
 
 
@@ -237,7 +308,9 @@ def optimize(
 
     # Call the optimizer LLM
     try:
-        response = call_llm_single_prompt(formatted_prompt, model, temperature=0.7)
+        response = call_llm_single_prompt(
+            formatted_prompt, model, model_params=get_model_params(model, temperature=0.7)
+        )
     except Exception as e:
         raise EvaluationError(f"Optimizer LLM call failed: {e}")
 
@@ -300,7 +373,9 @@ def analyze(
 
     # Call the LLM
     try:
-        response = call_llm_single_prompt(formatted_prompt, model, temperature=0.3)
+        response = call_llm_single_prompt(
+            formatted_prompt, model, model_params=get_model_params(model, temperature=0.3)
+        )
     except Exception as e:
         raise EvaluationError(f"Analysis LLM call failed: {e}")
 
@@ -351,7 +426,7 @@ def cluster_failures(
             prompt=formatted_prompt,
             model=model,
             response_model=ClusterResponse,
-            temperature=0.3,
+            model_params=get_model_params(model, temperature=0.3),
         )
     except Exception as e:
         raise EvaluationError(f"Clustering LLM call failed: {e}")
