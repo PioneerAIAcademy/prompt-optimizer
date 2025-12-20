@@ -69,9 +69,22 @@ The `samples/` directory contains a complete working example you can use immedia
 
 | File | Description |
 |------|-------------|
-| `sampled_emotions.csv` | 301 examples with columns: `text`, `emotion` (joy, anger, sadness, surprise) |
+| `sampled_emotions.csv` | 300 examples with columns: `text`, `emotion` (joy, anger, sadness, surprise) |
 | `system_prompt.txt` | Emotion classifier prompt that outputs one of 4 emotion labels |
 | `user_prompt.txt` | Simple template with `{text}` placeholder |
+
+### Dataset Source
+
+The sample dataset is derived from [GoEmotions](https://www.kaggle.com/datasets/debarshichanda/goemotions), a dataset of Reddit comments labeled with 28 fine-grained emotions. The data was processed as follows:
+
+1. **Filtered to single-emotion rows** - Removed examples labeled with multiple emotions
+2. **Excluded emotions** - Removed rows with neutral, fear, or disgust emotions
+3. **Excluded profanity** - Removed rows containing explicit language
+4. **Mapped to Ekman categories** - Remaining emotions were mapped to 4 basic emotion categories:
+   - **joy**: joy, amusement, approval, excitement, gratitude, love, optimism, relief, pride, admiration, desire, caring
+   - **anger**: anger, annoyance, disapproval
+   - **sadness**: sadness, disappointment, embarrassment, grief, remorse
+   - **surprise**: surprise, realization, confusion, curiosity
 
 ### Dataset Columns
 
