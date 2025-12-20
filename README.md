@@ -344,6 +344,18 @@ def score(row, grader_prompt, model) -> dict:
     return scores
 ```
 
+### Change Which Score Is Used for Optimization
+
+Edit the `primary_score()` function to specify which score column drives the optimization:
+
+```python
+def primary_score(df) -> str | None:
+    # Return the score column used for filtering failures and clustering
+    return "accuracy"  # or "relevance", "exact_match", etc.
+```
+
+This column is used for filtering low-scoring examples, selecting calibration examples, and computing statistics.
+
 ### Change How Responses Are Parsed
 
 Edit the `eval()` function:

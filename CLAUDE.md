@@ -36,7 +36,7 @@ This is a Streamlit app for iteratively optimizing LLM prompts using human feedb
 ### Core Files
 
 - **app.py** - Streamlit UI with three tabs: Create Project, Evaluate, Optimize
-- **config.py** - User-customizable functions that control the evaluation pipeline. Contains 6 functions: `stratify()`, `eval()`, `score()`, `optimize()`, `analyze()`, `cluster_failures()`
+- **config.py** - User-customizable functions that control the evaluation pipeline. Contains 7 functions: `stratify()`, `primary_score()`, `eval()`, `score()`, `optimize()`, `analyze()`, `cluster_failures()`
 - **utils.py** - Reusable utilities for LLM calls, templates, dataset splitting, file I/O, statistical functions, and example tracking
 - **clustering-prompt.jinja2** - Default template for LLM-based failure clustering
 
@@ -71,6 +71,7 @@ Projects are stored in `./projects/{project-name}/`:
 The main customization point is `config.py`. Modify these functions to adapt to different use cases:
 
 - `stratify(df)` - Returns column name for dataset stratification
+- `primary_score(df)` - Returns the column name of the primary score to use for optimization (filtering failures, clustering, etc.)
 - `eval(row, system_prompt, user_prompt_template, model)` - Calls LLM and extracts outputs. Must return dict with `response` key
 - `score(row, grader_prompt, model)` - Computes scores. Returns dict with paired keys (e.g., `accuracy` + `accuracy_reason`)
 - `optimize(..., target_prompt)` - Generates improved prompt (system or user based on `target_prompt`). Extracts result from `<optimized_prompt>` tags
@@ -134,12 +135,12 @@ The `cluster_failures()` function groups low-scoring examples by failure pattern
 
 Project and run configuration use type-safe Pydantic models:
 
-- **ProjectMetadata** - Project settings: `project_name`, `dataset_name`, `split_ratio`, `eval_model`, `optimizer_model`, `stratify_column`, `prompt_to_optimize`, `created_at`
-- **RunMetadata** - Run settings: `run_name`, `created_at`, `parent_run`, `eval_completed`, `scores`, `analysis_text`, `selected_examples`
+- **ProjectMetadata** - Project settings: `project_name`, `dataset_name`, `split_ratio`, `eval_model`, `optimizer_model`, `stratify_column`, `prompt_to_optimize`, `created_at`, `dataset_source`, `system_prompt_source`, `user_prompt_source`, `grader_prompt_source`
+- **RunMetadata** - Run settings: `run_name`, `created_at`, `parent_run`, `eval_completed`, `scores`, `analysis_text`, `selected_examples`, `clustering_results`
 
 ### Parallel Evaluation
 
-Evaluation uses `ThreadPoolExecutor(max_workers=4)` for parallel LLM calls, providing ~4x speedup on multi-row datasets.
+Evaluation uses `ThreadPoolExecutor(max_workers=8)` for parallel LLM calls, providing significant speedup on multi-row datasets.
 
 ### Template Validation
 
